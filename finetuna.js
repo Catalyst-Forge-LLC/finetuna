@@ -158,22 +158,43 @@ function detectVRAM() {
   }
 }
 
-function getContextOptions(vramGB) {
-  const opts = [
-    { name: '4096  – Fastest / low memory', value: 4096 },
-    { name: '8192  – Balanced (most common)', value: 8192 },
-  ];
+/** Ascending context sizes offered in prompts (common Ollama / llama.cpp steps). */
+const CONTEXT_TIERS = [4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072];
 
-  if (!vramGB) {
-    opts.push({ name: '12288 – High', value: 12288 }, { name: '16384 – Maximum (safe)', value: 16384 });
-  } else if (vramGB <= 16) {
-    opts.push({ name: '12288 – High (12–16 GB sweet spot)', value: 12288 }, { name: '16384 – Maximum for 12–16 GB', value: 16384 });
-  } else if (vramGB <= 24) {
-    opts.push({ name: '16384 – Good for 24 GB', value: 16384 }, { name: '32768 – High (fits most 24 GB cards)', value: 32768 });
-  } else if (vramGB <= 48) {
-    opts.push({ name: '32768 – Recommended for 24–48 GB', value: 32768 }, { name: '65536 – Monster mode', value: 65536 });
-  } else {
-    opts.push({ name: '32768 – Large', value: 32768 }, { name: '65536 – Very large', value: 65536 }, { name: '131072 – Extreme (80 GB+)', value: 131072 });
+/**
+ * Soft ceiling for the context picker from total VRAM (GB). Not model-specific; rough guide only.
+ * Uses vramGB * 2048 (capped at 131072) so larger GPUs see larger preset steps before Custom.
+ */
+function maxSuggestedCtxFromVram(vramGB) {
+  if (vramGB == null || vramGB < 1) return 65536;
+  return Math.min(131072, Math.round(vramGB * 2048));
+}
+
+function contextTierShortLabel(n) {
+  if (n <= 4096) return 'Fastest / low memory';
+  if (n <= 8192) return 'Balanced (typical default)';
+  if (n <= 12288) return 'High';
+  if (n <= 16384) return 'Large';
+  if (n <= 24576) return 'Very large';
+  if (n <= 32768) return 'Heavy context';
+  if (n <= 49152) return 'Very heavy';
+  if (n <= 65536) return 'Monster context';
+  if (n <= 98304) return 'Extreme';
+  return 'Maximum tier';
+}
+
+function getContextOptions(vramGB) {
+  const maxCtx = maxSuggestedCtxFromVram(vramGB);
+  const opts = [];
+  for (const t of CONTEXT_TIERS) {
+    if (t > maxCtx) break;
+    opts.push({ name: `${t}  – ${contextTierShortLabel(t)}`, value: t });
+  }
+  if (opts.length === 0) {
+    opts.push({
+      name: '4096  – Default (VRAM estimate low; use Custom if you need more)',
+      value: 4096,
+    });
   }
   opts.push({ name: 'Custom (any number you want)', value: 'custom' });
   return opts;
