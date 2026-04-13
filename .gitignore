@@ -1,0 +1,8 @@
+node_modules/
+blobs/
+manifests/
+Modelfile-*
+finetuna-results.json
+.DS_Store
+npm-debug.log
+dist/

@@ -1,0 +1,14 @@
+{
+  "name": "finetuna",
+  "version": "1.0.0",
+  "description": "Interactive Ollama model parameter tuner with auto-benchmarking",
+  "license": "MIT",
+  "main": "finetuna.js",
+  "type": "module",
+  "scripts": {
+    "start": "node finetuna.js"
+  },
+  "dependencies": {
+    "enquirer": "^2.3.6"
+  }
+}
