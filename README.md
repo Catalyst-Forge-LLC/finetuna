@@ -4,102 +4,83 @@
 
 **Overview**
 
-- Finetuna is a small CLI utility that helps create a `Modelfile` and run `ollama create` with sensible defaults, measure GPU fit, and iteratively reduce context size until the model offloads to GPU.
+Finetuna is a small CLI utility that helps create a `Modelfile`, run `ollama create` with sensible defaults, measure GPU fit, and iteratively shrink context (and optionally auto-tune batch/context) until the model behaves the way you want on the GPU.
+
+**Use cases**
+
+- **GPU-focused setup:** Try context and batch settings so workloads offload cleanly to the GPU and VRAM use matches what you have.
+- **Faster iteration:** Less manual guessing—guided prompts, optional auto-tune benchmarks, and a saved `Modelfile-finetuna` you can edit.
+- **Deployment prep:** Produce a repeatable Ollama model recipe before you wire the same name into apps or agents.
+
+**Core functionality**
+
+- Detects GPU VRAM when possible (NVIDIA `nvidia-smi`, AMD `rocm-smi`, then Windows WMI; some systems still need manual context picks).
+- Lists Ollama models, prompts for a source model and a new name, and writes **`Modelfile-finetuna`** with `num_ctx`, `num_gpu`, and `num_batch`.
+- Runs **`ollama create`** and checks GPU offload (e.g. via `ollama ps`).
+- If the model is not fully on GPU, offers stepping down context (and optional **auto-tune**: `num_batch` / `num_ctx` sweeps with benchmarks).
 
 **Prerequisites**
 
-- Node.js **v18+** (uses built-in `fetch` for the Ollama HTTP API)
-- [pnpm](https://pnpm.io/installation) (this repo uses a `pnpm-lock.yaml`; `npm` is not required)
-- Ollama installed and running (https://ollama.ai)
-- A shell with `ollama` and (optionally) `nvidia-smi`, AMD `rocm-smi`, or PowerShell on Windows for VRAM hints
+- Node.js **v18+**
+- [pnpm](https://pnpm.io/installation)
+- [Ollama](https://ollama.ai) installed and running
+- Optional: `nvidia-smi`, AMD `rocm-smi`, or Windows PowerShell for better VRAM hints
 
-**Install**
+**Installation**
 
 1. Clone the repo:
 
-```
+```bash
 git clone <your-repo-url>
 cd <repo>
 ```
 
 2. Install dependencies:
 
-```
+```bash
 pnpm install
 ```
 
 **Usage**
 
-- Run the interactive tuner (either works; `pnpm start` runs the same script as in `package.json`):
-
-```
+```bash
 node finetuna.js
 ```
 
-```
+```bash
 pnpm start
 ```
 
-- **OpenClaw / Gemma4 clients:** some tools need an explicit `TEMPLATE` plus `RENDERER` / `PARSER` in the Modelfile. Run with `--openclaw` or set `FINETUNA_OPENCLAW=1` to embed the Gemma4-oriented block (`TEMPLATE {{ .Prompt }}`, `RENDERER gemma4`, `PARSER gemma4`, and `temperature` / `top_k` / `top_p`). Use `--no-openclaw` to force it off. This is aimed at Gemma-class base models; other families may need different renderer/parser names later.
+`node finetuna.js --help` lists flags (`--auto-tune`, `--openclaw`, timeouts, skipping benchmark phases, etc.).
 
-- What it does:
-  - Detects GPU VRAM when possible (NVIDIA `nvidia-smi`, AMD `rocm-smi`, then a Windows WMI fallback; some systems still need manual context choices).
-  - Lists available Ollama models and prompts for a source model and new name.
-  - Writes `Modelfile-finetuna` with chosen parameters (`num_ctx`, `num_gpu`, `num_batch`).
-  - Runs `ollama create <newName> -f Modelfile-finetuna` and performs quick tests to check GPU offload.
-  - Optionally reduces context window and recreates the model if it won’t fully fit on GPU.
+**OpenClaw / Gemma-class clients:** some stacks expect an explicit `TEMPLATE` and `RENDERER` / `PARSER` in the Modelfile. Use **`--openclaw`** or set **`FINETUNA_OPENCLAW=1`** to inject a Gemma4-oriented block (`TEMPLATE {{ .Prompt }}`, `RENDERER gemma4`, `PARSER gemma4`, plus `temperature` / `top_k` / `top_p`). Use **`--no-openclaw`** to disable even if the env var is set. Other model families may need different names later.
 
-After a successful run, start the model with:
-
-```
+```bash
 ollama run <your-model-name>
 ```
 
 **Outputs**
 
-- `Modelfile-finetuna` — generated model configuration created by the script.
-
-**Git / Publishing notes**
-
-- Ignore large local blobs and manifests before pushing to GitHub. A sample `.gitignore` is included.
-
-Quick publish steps:
-
-```
-git init
-git add .
-git commit -m "Initial commit: add finetuna"
-git branch -M main
-git remote add origin git@github.com:YOUR_USERNAME/YOUR_REPO.git
-git push -u origin main
-```
-
-Replace `YOUR_USERNAME`/`YOUR_REPO` with your GitHub repo. You can also create the repo first on github.com and follow the instructions there.
-
-**Notes & tips**
-
-- The script relies on the `ollama` CLI being available and running locally (`ollama list`, `ollama create`, `ollama run`).
-- VRAM hints: NVIDIA `nvidia-smi`, then AMD `rocm-smi --showmeminfo vram`, then a Windows PowerShell WMI query. Apple Silicon and unusual setups may not report VRAM here.
-- Point Finetuna at a remote or custom Ollama port with the `OLLAMA_HOST` environment variable (same as Ollama’s CLI), e.g. `http://192.168.1.10:11434`.
-- Tweak `Modelfile-finetuna` as needed; the script will re-write it during retries.
-
-- Auto-tune warning: the optional auto-tune flow (batch-size benchmarking) will recreate the model multiple times and run benchmarks for each candidate — this can be time-consuming and will use GPU resources while running. Consider running auto-tune when you have time and GPU availability. You can control repeats with the `BENCH_REPEATS` environment variable.
+- **`Modelfile-finetuna`** — generated by the script (re-written when Finetuna recreates the model).
 
 **Environment variables**
 
-- `OLLAMA_HOST` — base URL for the Ollama HTTP API. Default: `http://127.0.0.1:11434`.
-- `FINETUNA_TIMEOUT` — timeout for prompt-eval / API calls, in milliseconds. Default: `20000` (20s).
-- `FINETUNA_GEN_TIMEOUT` — timeout for generation benchmarks and the first `/api/generate` after `ollama create`, in milliseconds. Default: `60000` (60s). Large models (e.g. Gemma 4) may need `120000` or more on first load; Finetuna retries once at a longer deadline and uses a longer `ollama run` fallback when the API fails.
-- `BENCH_REPEATS` — number of repeats per candidate during auto-tune benchmarking. Default: `3`.
-- `FINETUNA_OPENCLAW` — if set to `1`, `true`, or `yes`, same as `--openclaw` (see Notes above). Override with `--no-openclaw`.
+| Variable | Role | Default |
+|----------|------|--------|
+| `OLLAMA_HOST` | Ollama HTTP API base URL. | `http://127.0.0.1:11434` |
+| `FINETUNA_TIMEOUT` | Timeout for prompt-eval / short API calls (ms). | `20000` |
+| `FINETUNA_GEN_TIMEOUT` | Timeout for generation benchmarks and first `/api/generate` after create (ms). Large models may need `120000` or more on cold load; Finetuna retries once with a longer deadline and falls back to `ollama run` when useful. | `60000` |
+| `BENCH_REPEATS` | Repeats per candidate during auto-tune. | `3` |
+| `FINETUNA_OPENCLAW` | If `1` / `true` / `yes`, same as `--openclaw`. | off |
 
-Examples — set before running `pnpm start`:
+Examples:
 
 Unix / macOS (bash/zsh):
 
 ```bash
 export OLLAMA_HOST=http://127.0.0.1:11434
 export FINETUNA_TIMEOUT=30000
+export FINETUNA_GEN_TIMEOUT=120000
 export BENCH_REPEATS=5
 pnpm start
 ```
@@ -108,6 +89,7 @@ PowerShell (Windows):
 
 ```powershell
 $env:FINETUNA_TIMEOUT = '30000'
+$env:FINETUNA_GEN_TIMEOUT = '120000'
 $env:BENCH_REPEATS = '5'
 pnpm start
 ```
@@ -116,12 +98,38 @@ CMD (Windows):
 
 ```cmd
 set FINETUNA_TIMEOUT=30000
+set FINETUNA_GEN_TIMEOUT=120000
 set BENCH_REPEATS=5
 pnpm start
 ```
 
+**Notes & tips**
+
+- **VRAM hints** are best-effort; Apple Silicon and odd GPUs may not report size—use **Custom** context or the **32k stretch** preset when offered.
+- **Remote Ollama:** set `OLLAMA_HOST`, e.g. `http://192.168.1.10:11434`.
+- **Auto-tune** recreates the model many times and uses the GPU for benchmarks—run when you have time. Control load with `BENCH_REPEATS` and timeouts.
+- You can hand-edit **`Modelfile-finetuna`**; the script overwrites it on the next Finetuna run that recreates the model.
+- Use **`--verbose`** once if HTTP/API steps fail and you need the resolved `OLLAMA_HOST` and error hints.
+
+**Git / publishing**
+
+Ignore large local blobs and Ollama artifacts; see `.gitignore`.
+
+Quick publish steps:
+
+```bash
+git init
+git add .
+git commit -m "Initial commit: add finetuna"
+git branch -M main
+git remote add origin git@github.com:YOUR_USERNAME/YOUR_REPO.git
+git push -u origin main
+```
+
+Replace `YOUR_USERNAME` / `YOUR_REPO` with your repo, or create it on GitHub first and use the instructions there.
+
 **License**
 
-- [MIT](LICENSE)
+[MIT](LICENSE)
 
-Enjoy tuning! 🐟
+Enjoy tuning!
