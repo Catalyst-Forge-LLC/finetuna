@@ -126,6 +126,27 @@ function createTimeoutSignal(ms) {
   return c.signal;
 }
 
+/** Parse /api/generate body: single JSON or newline-delimited stream chunks. */
+function parseGenerateResponseBody(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    let last = null;
+    for (const line of t.split(/\n/)) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        last = JSON.parse(s);
+      } catch {
+        /* skip bad lines */
+      }
+    }
+    return last;
+  }
+}
+
 // Validate model name to prevent command injection (ollama names: alphanumeric, dash, underscore, dot, colon)
 function sanitizeName(name) {
   if (!/^[a-zA-Z0-9_:.-]+$/.test(name)) {
@@ -282,10 +303,10 @@ async function checkGPUFit(newName) {
     signal: loadAc.signal,
   }).finally(() => activeAbortControllers.delete(loadAc));
 
-  // Poll ollama ps until the model appears (up to 60s)
+  // Poll ollama ps until the model appears (large models / first load can exceed 60s)
   let psOutput = '';
   let found = false;
-  for (let attempt = 0; attempt < 30; attempt++) {
+  for (let attempt = 0; attempt < 90; attempt++) {
     await new Promise((r) => setTimeout(r, 2000));
     try {
       psOutput = execSync('ollama ps', { encoding: 'utf8' });
@@ -310,7 +331,7 @@ async function checkGPUFit(newName) {
   }
 
   if (!found) {
-    console.log('\n⚠️  Model did not appear in ollama ps after 60s.');
+    console.log('\nModel did not appear in ollama ps after ~3 minutes (first load can be slow for large models).');
     return false;
   }
 
@@ -381,44 +402,55 @@ Remember: every sentence should be more absurd than the last. The goal is maximu
 
 async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
   const body = { model: newName, prompt: 'Tell me a short, fun fact about AI.', stream: false, options: { num_predict: 50 } };
-  function ollamaRunFallback(start) {
+  const runUrl = `${OLLAMA_BASE}/api/generate`;
+
+  function ollamaRunFallback(start, cliTimeoutMs) {
     const run = spawnSync('ollama', ['run', newName, 'Tell me a short, fun fact about AI. Answer in 20 words or less.'], {
       encoding: 'utf8',
-      timeout: timeoutMs,
+      timeout: cliTimeoutMs,
       maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
     });
     const out = (run.stdout || '').trim();
+    const errOut = (run.stderr || '').trim();
     if (out) {
       return { success: true, output: out, tokensGenerated: 0, tpsEval: 'N/A', tpsWall: 'N/A', totalTimeSec: (Date.now() - start) / 1000 };
     }
-    return { success: false, errMsg: 'No response from Ollama API' };
+    const bits = [errOut, run.error && run.error.message, run.status !== 0 ? `ollama run exit ${run.status}` : ''].filter(Boolean);
+    return { success: false, errMsg: bits.join(' — ') || 'No output from ollama run (model may still be loading — try FINETUNA_GEN_TIMEOUT)' };
   }
-  try {
+
+  async function tryHttp(deadlineMs) {
     const start = Date.now();
     let res;
     try {
-      res = await fetch(`${OLLAMA_BASE}/api/generate`, {
+      res = await fetch(runUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: createTimeoutSignal(timeoutMs),
+        signal: createTimeoutSignal(deadlineMs),
       });
-    } catch {
-      return ollamaRunFallback(start);
+    } catch (e) {
+      const msg = e.name === 'AbortError' ? `HTTP request timed out (${deadlineMs}ms)` : e.message || String(e);
+      if (FLAGS.verbose) console.log(`   [verbose] ${runUrl} → ${msg}`);
+      return { ok: false, errMsg: msg, start };
     }
     const end = Date.now();
-    if (!res.ok) {
-      return ollamaRunFallback(start);
-    }
     const text = await res.text();
-    if (!text) {
-      return ollamaRunFallback(start);
+    if (!res.ok) {
+      const snippet = (text || '').slice(0, 300);
+      if (FLAGS.verbose) console.log(`   [verbose] HTTP ${res.status} ${snippet}`);
+      return { ok: false, errMsg: `HTTP ${res.status}${snippet ? `: ${snippet}` : ''}`, start };
     }
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return { success: false, errMsg: 'Invalid JSON from Ollama API' };
+    if (!text || !text.trim()) {
+      return { ok: false, errMsg: 'Empty body from Ollama /api/generate', start };
+    }
+    const data = parseGenerateResponseBody(text);
+    if (!data) {
+      return { ok: false, errMsg: 'Could not parse JSON from /api/generate', start };
+    }
+    if (data.error) {
+      return { ok: false, errMsg: String(data.error), start };
     }
     const outputText = data.response || '';
     const tokensGenerated = data.eval_count || 0;
@@ -426,8 +458,30 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     const totalTimeSec = (end - start) / 1000;
     const tpsEval = tokensGenerated && evalDurationMs ? (tokensGenerated / (evalDurationMs / 1000)).toFixed(1) : 'N/A';
     const tpsWall = tokensGenerated && totalTimeSec ? (tokensGenerated / totalTimeSec).toFixed(1) : 'N/A';
+    return {
+      ok: true,
+      result: { success: true, output: outputText, tokensGenerated, tpsEval, tpsWall, totalTimeSec },
+      start,
+    };
+  }
 
-    return { success: true, output: outputText, tokensGenerated, tpsEval, tpsWall, totalTimeSec };
+  try {
+    const cliTimeout = Math.max(timeoutMs, 180000);
+    let attempt = await tryHttp(timeoutMs);
+    if (!attempt.ok) {
+      const retryMs = Math.min(Math.max(timeoutMs * 2, 120000), 600000);
+      const retryable =
+        /timed out|AbortError|ECONNREFUSED|fetch failed|Empty body|HTTP \d/i.test(attempt.errMsg || '') || attempt.errMsg === 'Could not parse JSON from /api/generate';
+      if (retryable) {
+        if (FLAGS.verbose) console.log(`   [verbose] Retrying /api/generate with ${retryMs}ms timeout...`);
+        attempt = await tryHttp(retryMs);
+      }
+    }
+    if (!attempt.ok) {
+      if (FLAGS.verbose) console.log(`   [verbose] API failed (${attempt.errMsg}); trying ollama run (timeout ${cliTimeout}ms)...`);
+      return ollamaRunFallback(attempt.start, cliTimeout);
+    }
+    return attempt.result;
   } catch (err) {
     return { success: false, errMsg: err.message || String(err) };
   }
@@ -450,7 +504,13 @@ async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
     if (!text) {
       return { success: false, errMsg: 'Empty response from Ollama API' };
     }
-    const data = JSON.parse(text);
+    const data = parseGenerateResponseBody(text);
+    if (!data) {
+      return { success: false, errMsg: 'Could not parse /api/generate response' };
+    }
+    if (data.error) {
+      return { success: false, errMsg: String(data.error) };
+    }
     const promptTokens = data.prompt_eval_count || 0;
     const promptDurationNs = data.prompt_eval_duration || 0;
     const promptDurationMs = promptDurationNs / 1_000_000;

@@ -89,7 +89,7 @@ Replace `YOUR_USERNAME`/`YOUR_REPO` with your GitHub repo. You can also create t
 
 - `OLLAMA_HOST` — base URL for the Ollama HTTP API. Default: `http://127.0.0.1:11434`.
 - `FINETUNA_TIMEOUT` — timeout for prompt-eval / API calls, in milliseconds. Default: `20000` (20s).
-- `FINETUNA_GEN_TIMEOUT` — timeout for generation benchmarks, in milliseconds. Default: `60000` (60s).
+- `FINETUNA_GEN_TIMEOUT` — timeout for generation benchmarks and the first `/api/generate` after `ollama create`, in milliseconds. Default: `60000` (60s). Large models (e.g. Gemma 4) may need `120000` or more on first load; Finetuna retries once at a longer deadline and uses a longer `ollama run` fallback when the API fails.
 - `BENCH_REPEATS` — number of repeats per candidate during auto-tune benchmarking. Default: `3`.
 - `FINETUNA_OPENCLAW` — if set to `1`, `true`, or `yes`, same as `--openclaw` (see Notes above). Override with `--no-openclaw`.
 
