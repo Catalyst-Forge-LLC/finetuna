@@ -9,6 +9,7 @@
 **Prerequisites**
 
 - Node.js **v18+** (uses built-in `fetch` for the Ollama HTTP API)
+- [pnpm](https://pnpm.io/installation) (this repo uses a `pnpm-lock.yaml`; `npm` is not required)
 - Ollama installed and running (https://ollama.ai)
 - A shell with `ollama` and (optionally) `nvidia-smi`, AMD `rocm-smi`, or PowerShell on Windows for VRAM hints
 
@@ -24,15 +25,19 @@ cd <repo>
 2. Install dependencies:
 
 ```
-npm install
+pnpm install
 ```
 
 **Usage**
 
-- Run the interactive tuner:
+- Run the interactive tuner (either works; `pnpm start` runs the same script as in `package.json`):
 
 ```
 node finetuna.js
+```
+
+```
+pnpm start
 ```
 
 - What it does:
@@ -85,7 +90,7 @@ Replace `YOUR_USERNAME`/`YOUR_REPO` with your GitHub repo. You can also create t
 - `FINETUNA_GEN_TIMEOUT` — timeout for generation benchmarks, in milliseconds. Default: `60000` (60s).
 - `BENCH_REPEATS` — number of repeats per candidate during auto-tune benchmarking. Default: `3`.
 
-Examples — set before running `npm start`:
+Examples — set before running `pnpm start`:
 
 Unix / macOS (bash/zsh):
 
@@ -93,7 +98,7 @@ Unix / macOS (bash/zsh):
 export OLLAMA_HOST=http://127.0.0.1:11434
 export FINETUNA_TIMEOUT=30000
 export BENCH_REPEATS=5
-npm start
+pnpm start
 ```
 
 PowerShell (Windows):
@@ -101,7 +106,7 @@ PowerShell (Windows):
 ```powershell
 $env:FINETUNA_TIMEOUT = '30000'
 $env:BENCH_REPEATS = '5'
-npm start
+pnpm start
 ```
 
 CMD (Windows):
@@ -109,11 +114,11 @@ CMD (Windows):
 ```cmd
 set FINETUNA_TIMEOUT=30000
 set BENCH_REPEATS=5
-npm start
+pnpm start
 ```
 
 **License**
 
-- Add a `LICENSE` file if you plan to publish this repository publicly.
+- [MIT](LICENSE)
 
 Enjoy tuning! 🐟

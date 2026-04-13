@@ -1,0 +1,13 @@
+---
+description: After making repo changes, always supply a ready-to-paste git commit message.
+alwaysApply: true
+---
+
+# Commit messages
+
+When you modify files in this repository (code, docs, config, or rules), end your reply with a **git commit message** the user can paste as-is.
+
+- Use a conventional-style **subject line** (e.g. `feat:`, `fix:`, `docs:`, `chore:`) under ~72 characters when reasonable.
+- Add a **body** when the change is non-trivial: what changed, why, and any follow-ups or risks.
+- Write in full sentences in the body; keep the subject imperative and concise.
+- Put the full message in one fenced `text` block so the user can copy subject and body together.
