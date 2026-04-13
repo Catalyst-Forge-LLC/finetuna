@@ -1,6 +1,6 @@
 import enquirerPkg from 'enquirer';
 const { prompt } = enquirerPkg;
-import { execSync, spawn, spawnSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -36,6 +36,7 @@ function parseFlags() {
           '  --verbose             Print raw ollama list / ollama ps output',
           '',
           'Environment variables (override defaults, flags take precedence):',
+          '  OLLAMA_HOST           Ollama HTTP base URL (default http://127.0.0.1:11434)',
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
           '  BENCH_REPEATS         Same as --bench-repeats',
@@ -94,6 +95,25 @@ function parseFlags() {
 
 const FLAGS = parseFlags();
 
+/** Ollama HTTP API base (same env as Ollama CLI: host/port, default 127.0.0.1:11434). */
+function getOllamaBase() {
+  let raw = (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434').trim();
+  raw = raw.replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(raw)) raw = `http://${raw}`;
+  return raw;
+}
+
+const OLLAMA_BASE = getOllamaBase();
+
+function createTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
 // Validate model name to prevent command injection (ollama names: alphanumeric, dash, underscore, dot, colon)
 function sanitizeName(name) {
   if (!/^[a-zA-Z0-9_:.-]+$/.test(name)) {
@@ -102,13 +122,12 @@ function sanitizeName(name) {
   return name;
 }
 
-// Track spawned processes for SIGINT cleanup
-const activeProcs = new Set();
+const activeAbortControllers = new Set();
 process.on('SIGINT', () => {
   console.log('\n\n👋 Interrupted — cleaning up...');
-  for (const p of activeProcs) {
+  for (const ac of activeAbortControllers) {
     try {
-      p.kill();
+      ac.abort();
     } catch (_) {}
   }
   process.exit(130);
@@ -120,6 +139,13 @@ function detectVRAM() {
     const mib = parseInt(nvidia, 10);
     return Math.round(mib / 1024);
   } catch (e) {
+    try {
+      const rocm = execSync('rocm-smi --showmeminfo vram', { encoding: 'utf8', timeout: 8000 });
+      const b = rocm.match(/VRAM Total Memory \(B\):\s*(\d+)/i);
+      if (b) return Math.max(1, Math.round(parseInt(b[1], 10) / (1024 * 1024 * 1024)));
+    } catch (eR) {
+      /* no ROCm */
+    }
     try {
       const ps = execSync('powershell -Command "(Get-CimInstance Win32_VideoController | Select-Object -First 1).AdapterRAM / 1GB"', {
         encoding: 'utf8',
@@ -173,11 +199,15 @@ async function checkGPUFit(newName) {
   }
   await new Promise((r) => setTimeout(r, 1500));
 
-  // Load the model via API with a tracked spawned process
-  const loadPayload = JSON.stringify({ model: newName, prompt: 'hi', stream: false, options: { num_predict: 1 } });
-  const loadProc = spawn('curl', ['-s', '-X', 'POST', 'http://localhost:11434/api/generate', '-d', loadPayload], { stdio: 'ignore' });
-  activeProcs.add(loadProc);
-  loadProc.on('close', () => activeProcs.delete(loadProc));
+  const loadAc = new AbortController();
+  activeAbortControllers.add(loadAc);
+  const loadBody = JSON.stringify({ model: newName, prompt: 'hi', stream: false, options: { num_predict: 1 } });
+  const loadPromise = fetch(`${OLLAMA_BASE}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: loadBody,
+    signal: loadAc.signal,
+  }).finally(() => activeAbortControllers.delete(loadAc));
 
   // Poll ollama ps until the model appears (up to 60s)
   let psOutput = '';
@@ -199,8 +229,12 @@ async function checkGPUFit(newName) {
     process.stdout.write(`   Waiting for model to load (${(attempt + 1) * 2}s)...\r`);
   }
 
-  loadProc.kill();
-  activeProcs.delete(loadProc);
+  loadAc.abort();
+  try {
+    await loadPromise;
+  } catch (_) {
+    /* aborted or completed */
+  }
 
   if (!found) {
     console.log('\n⚠️  Model did not appear in ollama ps after 60s.');
@@ -273,33 +307,46 @@ Finally, provide detailed tasting notes as if reviewing a fine wine, but it is a
 Remember: every sentence should be more absurd than the last. The goal is maximum theatrical energy. You are performing for the ages. This sandwich is your magnum opus. Do not hold back.`;
 
 async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
-  const payload = JSON.stringify({ model: newName, prompt: 'Tell me a short, fun fact about AI.', stream: false, options: { num_predict: 50 } });
-  try {
-    const start = Date.now();
-    const curl = spawnSync('curl', ['-s', '-X', 'POST', 'http://localhost:11434/api/generate', '-d', payload], {
+  const body = { model: newName, prompt: 'Tell me a short, fun fact about AI.', stream: false, options: { num_predict: 50 } };
+  function ollamaRunFallback(start) {
+    const run = spawnSync('ollama', ['run', newName, 'Tell me a short, fun fact about AI. Answer in 20 words or less.'], {
       encoding: 'utf8',
       timeout: timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     });
-    const end = Date.now();
-
-    if (curl.error || curl.status !== 0 || !curl.stdout) {
-      // Try fallback run to capture any response
-      const run = spawnSync('ollama', ['run', newName, 'Tell me a short, fun fact about AI. Answer in 20 words or less.'], {
-        encoding: 'utf8',
-        timeout: timeoutMs,
-        maxBuffer: 10 * 1024 * 1024,
-      });
-
-      const out = (run.stdout || '').trim();
-      const errOut = (run.stderr || '').trim();
-      if (out) {
-        return { success: true, output: out, tokensGenerated: 0, tpsEval: 'N/A', tpsWall: 'N/A', totalTimeSec: (Date.now() - start) / 1000 };
-      }
-      return { success: false, errMsg: curl.error ? curl.error.message : 'No response from curl' };
+    const out = (run.stdout || '').trim();
+    if (out) {
+      return { success: true, output: out, tokensGenerated: 0, tpsEval: 'N/A', tpsWall: 'N/A', totalTimeSec: (Date.now() - start) / 1000 };
     }
-
-    const data = JSON.parse(curl.stdout);
+    return { success: false, errMsg: 'No response from Ollama API' };
+  }
+  try {
+    const start = Date.now();
+    let res;
+    try {
+      res = await fetch(`${OLLAMA_BASE}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: createTimeoutSignal(timeoutMs),
+      });
+    } catch {
+      return ollamaRunFallback(start);
+    }
+    const end = Date.now();
+    if (!res.ok) {
+      return ollamaRunFallback(start);
+    }
+    const text = await res.text();
+    if (!text) {
+      return ollamaRunFallback(start);
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return { success: false, errMsg: 'Invalid JSON from Ollama API' };
+    }
     const outputText = data.response || '';
     const tokensGenerated = data.eval_count || 0;
     const evalDurationMs = (data.eval_duration || 0) / 1_000_000;
@@ -315,20 +362,22 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
 
 // Measures prompt-eval speed (TTFT) using a long prompt — this is what num_batch actually affects
 async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
-  // Ask for minimal output so we isolate prompt processing time
-  const payload = JSON.stringify({ model: newName, prompt: LONG_PROMPT, stream: false, options: { num_predict: 1 } });
+  const body = { model: newName, prompt: LONG_PROMPT, stream: false, options: { num_predict: 1 } };
   try {
-    const curl = spawnSync('curl', ['-s', '-X', 'POST', 'http://localhost:11434/api/generate', '-d', payload], {
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
+    const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: createTimeoutSignal(timeoutMs),
     });
-
-    if (curl.error || curl.status !== 0 || !curl.stdout) {
-      return { success: false, errMsg: curl.error ? curl.error.message : 'No response from curl' };
+    if (!res.ok) {
+      return { success: false, errMsg: `HTTP ${res.status}` };
     }
-
-    const data = JSON.parse(curl.stdout);
+    const text = await res.text();
+    if (!text) {
+      return { success: false, errMsg: 'Empty response from Ollama API' };
+    }
+    const data = JSON.parse(text);
     const promptTokens = data.prompt_eval_count || 0;
     const promptDurationNs = data.prompt_eval_duration || 0;
     const promptDurationMs = promptDurationNs / 1_000_000;
@@ -337,7 +386,8 @@ async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
 
     return { success: true, promptTokens, promptDurationMs, promptTps, ttftMs };
   } catch (err) {
-    return { success: false, errMsg: err.message || String(err) };
+    const msg = err.name === 'AbortError' ? 'Request timed out' : err.message || String(err);
+    return { success: false, errMsg: msg };
   }
 }
 
@@ -397,7 +447,11 @@ async function main() {
 
   const vramGB = detectVRAM();
   if (vramGB) console.log(`🧠 Detected: ${vramGB} GB VRAM — nice rig!`);
-  else console.log('🧠 Could not auto-detect VRAM');
+  else
+    console.log(
+      '🧠 Could not auto-detect VRAM (tries NVIDIA nvidia-smi, AMD rocm-smi, then Windows WMI — Apple / some GPUs may need manual picks)',
+    );
+  if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
   console.log('');
 
   // Fetch models
@@ -475,6 +529,7 @@ async function main() {
 
   let fullGPU = false;
   let currentCtx = numCtx;
+  let bestBatch = null;
 
   // After initial creation, offer optional auto-tune
   let autoTune = FLAGS.autoTune;
@@ -495,8 +550,10 @@ async function main() {
     const { repeats } = await prompt([{ type: 'input', name: 'repeats', message: 'Benchmark repeats per candidate:', initial: String(defaultRepeats) }]);
     const repeatCount = parseInt(repeats, 10) || defaultRepeats;
     const currentBatch = parseInt(numBatch, 10) || 512;
-    let bestBatch = currentBatch;
+    bestBatch = currentBatch;
     let bestCtx = currentCtx;
+    const batchResults = [];
+    const ctxResults = [];
 
     // ── Phase 1: num_batch sweep (measures prompt-eval / TTFT) ──
     if (!FLAGS.skipBatch) {
@@ -521,7 +578,6 @@ async function main() {
       console.log('   Candidates: ' + batchCandidates.join(', '));
       console.log('   Repeats: ' + repeatCount + '\n');
 
-      const batchResults = [];
       for (let ci = 0; ci < batchCandidates.length; ci++) {
         const cand = batchCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${batchCandidates.length}] num_batch = ${cand}`);
@@ -568,7 +624,11 @@ async function main() {
       } else {
         console.log(`\n   ✅ Original batch size ${currentBatch} confirmed as best.`);
       }
+    } else {
+      console.log('  Skipping Phase 1 (--skip-batch).');
+    }
 
+    if (!FLAGS.skipCtx) {
       // ── Phase 2: num_ctx sweep (measures generation TPS + GPU fit) ──
       console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('  Phase 2: num_ctx sweep (generation TPS + GPU fit)');
@@ -598,7 +658,6 @@ async function main() {
       console.log('   Repeats: ' + repeatCount);
       console.log('   Only candidates with 100% GPU offload will be kept.\n');
 
-      const ctxResults = [];
       for (let ci = 0; ci < ctxCandidates.length; ci++) {
         const cand = ctxCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${ctxCandidates.length}] num_ctx = ${cand}`);
@@ -671,7 +730,9 @@ async function main() {
         console.log('\n   ⚠️  No contexts fit 100% GPU — keeping original.');
         bestCtx = currentCtx;
       }
-    } // end !FLAGS.skipCtx
+    } else {
+      console.log('  Skipping Phase 2 (--skip-ctx).');
+    }
 
     // ── Final: apply best settings ──
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -693,8 +754,8 @@ async function main() {
       model: newName,
       source: sourceModel,
       settings: { bestBatch, bestCtx, numGpu },
-      batchResults: typeof batchResults !== 'undefined' ? batchResults : [],
-      ctxResults: typeof ctxResults !== 'undefined' ? ctxResults : [],
+      batchResults,
+      ctxResults,
     };
     const resultsPath = path.join(process.cwd(), 'finetuna-results.json');
     fs.writeFileSync(resultsPath, JSON.stringify(resultsLog, null, 2));

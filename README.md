@@ -8,9 +8,9 @@
 
 **Prerequisites**
 
-- Node.js (v16+; v18+ recommended)
+- Node.js **v18+** (uses built-in `fetch` for the Ollama HTTP API)
 - Ollama installed and running (https://ollama.ai)
-- A shell with `ollama`, `curl`, and (optionally) `nvidia-smi` or PowerShell (Windows)
+- A shell with `ollama` and (optionally) `nvidia-smi`, AMD `rocm-smi`, or PowerShell on Windows for VRAM hints
 
 **Install**
 
@@ -36,7 +36,7 @@ node finetuna.js
 ```
 
 - What it does:
-  - Detects GPU VRAM (when possible).
+  - Detects GPU VRAM when possible (NVIDIA `nvidia-smi`, AMD `rocm-smi`, then a Windows WMI fallback; some systems still need manual context choices).
   - Lists available Ollama models and prompts for a source model and new name.
   - Writes `Modelfile-finetuna` with chosen parameters (`num_ctx`, `num_gpu`, `num_batch`).
   - Runs `ollama create <newName> -f Modelfile-finetuna` and performs quick tests to check GPU offload.
@@ -72,14 +72,17 @@ Replace `YOUR_USERNAME`/`YOUR_REPO` with your GitHub repo. You can also create t
 **Notes & tips**
 
 - The script relies on the `ollama` CLI being available and running locally (`ollama list`, `ollama create`, `ollama run`).
-- If `nvidia-smi` is not available on Windows, the script attempts a PowerShell query.
+- VRAM hints: NVIDIA `nvidia-smi`, then AMD `rocm-smi --showmeminfo vram`, then a Windows PowerShell WMI query. Apple Silicon and unusual setups may not report VRAM here.
+- Point Finetuna at a remote or custom Ollama port with the `OLLAMA_HOST` environment variable (same as Ollama’s CLI), e.g. `http://192.168.1.10:11434`.
 - Tweak `Modelfile-finetuna` as needed; the script will re-write it during retries.
 
 - Auto-tune warning: the optional auto-tune flow (batch-size benchmarking) will recreate the model multiple times and run benchmarks for each candidate — this can be time-consuming and will use GPU resources while running. Consider running auto-tune when you have time and GPU availability. You can control repeats with the `BENCH_REPEATS` environment variable.
 
 **Environment variables**
 
-- `FINETUNA_TIMEOUT` — timeout for sample prompt and fallback runs, in milliseconds. Default: `20000` (20s).
+- `OLLAMA_HOST` — base URL for the Ollama HTTP API. Default: `http://127.0.0.1:11434`.
+- `FINETUNA_TIMEOUT` — timeout for prompt-eval / API calls, in milliseconds. Default: `20000` (20s).
+- `FINETUNA_GEN_TIMEOUT` — timeout for generation benchmarks, in milliseconds. Default: `60000` (60s).
 - `BENCH_REPEATS` — number of repeats per candidate during auto-tune benchmarking. Default: `3`.
 
 Examples — set before running `npm start`:
@@ -87,6 +90,7 @@ Examples — set before running `npm start`:
 Unix / macOS (bash/zsh):
 
 ```bash
+export OLLAMA_HOST=http://127.0.0.1:11434
 export FINETUNA_TIMEOUT=30000
 export BENCH_REPEATS=5
 npm start
