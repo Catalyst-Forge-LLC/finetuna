@@ -195,20 +195,33 @@ function contextTierShortLabel(n) {
   return 'Maximum tier';
 }
 
+const STRETCH_CTX = 32768;
+
 function getContextOptions(vramGB) {
   const maxCtx = maxSuggestedCtxFromVram(vramGB);
   const opts = [];
+  const seen = new Set();
   for (const t of CONTEXT_TIERS) {
     if (t > maxCtx) break;
+    seen.add(t);
     opts.push({ name: `${t}  – ${contextTierShortLabel(t)}`, value: t });
   }
   if (opts.length === 0) {
+    seen.add(4096);
     opts.push({
       name: '4096  – Default (VRAM estimate low; use Custom if you need more)',
       value: 4096,
     });
   }
-  opts.push({ name: 'Custom (any number you want)', value: 'custom' });
+  if (!seen.has(STRETCH_CTX) && maxCtx < STRETCH_CTX) {
+    seen.add(STRETCH_CTX);
+    opts.push({
+      name: `${STRETCH_CTX}  – Stretch (32k; above VRAM hint — may need auto-tune / lower ctx)`,
+      value: STRETCH_CTX,
+    });
+  }
+  // Enquirer Select returns choice.name, not choice.value — use name: 'custom' so the follow-up prompt runs.
+  opts.push({ name: 'custom', message: 'Custom (any number you want)' });
   return opts;
 }
 
@@ -216,6 +229,7 @@ function unwrapChoice(choice) {
   if (choice === 'custom') return 'custom';
   if (choice && typeof choice === 'object' && Object.prototype.hasOwnProperty.call(choice, 'value')) return choice.value;
   const s = String(choice || '');
+  if (/^custom$/i.test(s.trim()) || /^custom\b/i.test(s)) return 'custom';
   const m = s.match(/\d+/);
   if (m) return parseInt(m[0], 10);
   return choice;
@@ -538,7 +552,7 @@ async function main() {
       if (match && match[1].includes(':')) models.push(match[1]);
     }
   } catch (err) {
-    console.error('❌ Could not run "ollama list". Is Ollama running?');
+    console.error('Could not run "ollama list". Is Ollama running?');
     process.exit(1);
   }
 
@@ -575,8 +589,12 @@ async function main() {
   const rawCtx = unwrapChoice(ctxChoice);
   let numCtx =
     rawCtx === 'custom'
-      ? parseInt((await prompt([{ type: 'input', name: 'customCtx', message: 'Custom context size (any number):', initial: '8192' }])).customCtx, 10)
+      ? parseInt((await prompt([{ type: 'input', name: 'customCtx', message: 'Custom context size (any number):', initial: '32768' }])).customCtx, 10)
       : rawCtx;
+  if (!Number.isFinite(numCtx) || numCtx < 256) {
+    console.error('Invalid context size; using 8192.');
+    numCtx = 8192;
+  }
 
   const { numBatch } = await prompt([{ type: 'input', name: 'numBatch', message: 'Batch size (num_batch) – higher = faster generation:', initial: '512' }]);
   const { numGpu } = await prompt([{ type: 'input', name: 'numGpu', message: 'GPU layers (num_gpu) – 999 = max possible:', initial: '999' }]);
@@ -845,7 +863,7 @@ async function main() {
       if (!reduce) break;
 
       const lowerOptions = getContextOptions(vramGB).filter((o) => o.value !== 'custom' && o.value < currentCtx);
-      if (lowerOptions.length === 0) lowerOptions.push({ name: 'Custom (lower)', value: 'custom' });
+      if (lowerOptions.length === 0) lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
 
       const { newCtxChoice } = await prompt([{ type: 'select', name: 'newCtxChoice', message: 'Pick a lower context size to try:', choices: lowerOptions }]);
       const rawNew = unwrapChoice(newCtxChoice);
