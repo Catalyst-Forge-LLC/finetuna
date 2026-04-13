@@ -17,6 +17,7 @@ function parseFlags() {
     verbose: false,
     skipBatch: false,
     skipCtx: false,
+    openClaw: ['1', 'true', 'yes'].includes(String(process.env.FINETUNA_OPENCLAW || '').toLowerCase()),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -33,10 +34,13 @@ function parseFlags() {
           '  --auto-tune           Skip auto-tune confirmation prompt',
           '  --skip-batch          Skip Phase 1 (num_batch sweep)',
           '  --skip-ctx            Skip Phase 2 (num_ctx sweep)',
+          '  --openclaw            Add Gemma4 TEMPLATE/RENDERER/PARSER + sampling (OpenClaw-friendly)',
+          '  --no-openclaw         Turn off OpenClaw block even if FINETUNA_OPENCLAW is set',
           '  --verbose             Print raw ollama list / ollama ps output',
           '',
           'Environment variables (override defaults, flags take precedence):',
           '  OLLAMA_HOST           Ollama HTTP base URL (default http://127.0.0.1:11434)',
+          '  FINETUNA_OPENCLAW     If 1/true/yes, same as --openclaw (use --no-openclaw to force off)',
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
           '  BENCH_REPEATS         Same as --bench-repeats',
@@ -86,6 +90,14 @@ function parseFlags() {
     }
     if (a === '--skip-ctx') {
       flags.skipCtx = true;
+      continue;
+    }
+    if (a === '--openclaw') {
+      flags.openClaw = true;
+      continue;
+    }
+    if (a === '--no-openclaw') {
+      flags.openClaw = false;
       continue;
     }
   }
@@ -207,6 +219,32 @@ function unwrapChoice(choice) {
   const m = s.match(/\d+/);
   if (m) return parseInt(m[0], 10);
   return choice;
+}
+
+/**
+ * Build Modelfile text. With OpenClaw mode, embeds explicit Gemma4 TEMPLATE / RENDERER / PARSER
+ * and sampling PARAMETERs (some API clients require these in the Modelfile).
+ */
+function buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, finetunaNote = '' }) {
+  const commentLine = finetunaNote ? `# ${vramComment} — ${finetunaNote}` : `# ${vramComment}`;
+  const openClawBlock = FLAGS.openClaw
+    ? `# OpenClaw compatibility (see --openclaw / FINETUNA_OPENCLAW)
+TEMPLATE {{ .Prompt }}
+RENDERER gemma4
+PARSER gemma4
+PARAMETER temperature 1
+PARAMETER top_k 64
+PARAMETER top_p 0.95
+
+`
+    : '';
+  return `FROM ${sourceModel}
+
+${openClawBlock}${commentLine}
+PARAMETER num_ctx ${numCtx}
+PARAMETER num_gpu ${numGpu}
+PARAMETER num_batch ${numBatch}
+`;
 }
 
 async function checkGPUFit(newName) {
@@ -466,6 +504,12 @@ async function main() {
   console.log('=====================================\n');
   console.log("You can tune a guitar... but you can't tunafish! Let's fine-tune some models! 🐟\n");
 
+  if (FLAGS.openClaw) {
+    console.log(
+      'OpenClaw mode: Modelfile will include TEMPLATE + RENDERER/PARSER gemma4 + temperature/top_k/top_p (intended for Gemma-class models).\n',
+    );
+  }
+
   const vramGB = detectVRAM();
   if (vramGB) console.log(`🧠 Detected: ${vramGB} GB VRAM — nice rig!`);
   else
@@ -538,7 +582,7 @@ async function main() {
   const { numGpu } = await prompt([{ type: 'input', name: 'numGpu', message: 'GPU layers (num_gpu) – 999 = max possible:', initial: '999' }]);
 
   const vramComment = vramGB ? `Optimized for ${vramGB}GB VRAM (auto-detected)` : 'Optimized for your GPU';
-  const modelfileContent = `FROM ${sourceModel}\n\n# ${vramComment}\nPARAMETER num_ctx ${numCtx}\nPARAMETER num_gpu ${numGpu}\nPARAMETER num_batch ${numBatch}\n`;
+  const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch });
 
   const modelfilePath = path.join(process.cwd(), 'Modelfile-finetuna');
   fs.writeFileSync(modelfilePath, modelfileContent);
@@ -602,7 +646,7 @@ async function main() {
       for (let ci = 0; ci < batchCandidates.length; ci++) {
         const cand = batchCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${batchCandidates.length}] num_batch = ${cand}`);
-        const content = `FROM ${sourceModel}\n\n# ${vramComment}\nPARAMETER num_ctx ${currentCtx}\nPARAMETER num_gpu ${numGpu}\nPARAMETER num_batch ${cand}\n`;
+        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: currentCtx, numGpu, numBatch: cand });
         fs.writeFileSync(modelfilePath, content);
         const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
         if (createResult.status !== 0) {
@@ -682,7 +726,7 @@ async function main() {
       for (let ci = 0; ci < ctxCandidates.length; ci++) {
         const cand = ctxCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${ctxCandidates.length}] num_ctx = ${cand}`);
-        const content = `FROM ${sourceModel}\n\n# ${vramComment}\nPARAMETER num_ctx ${cand}\nPARAMETER num_gpu ${numGpu}\nPARAMETER num_batch ${bestBatch}\n`;
+        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: cand, numGpu, numBatch: bestBatch });
         fs.writeFileSync(modelfilePath, content);
         const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
         if (createResult.status !== 0) {
@@ -764,7 +808,14 @@ async function main() {
     console.log(`   num_gpu   : ${numGpu}`);
 
     currentCtx = bestCtx;
-    const finalContent = `FROM ${sourceModel}\n\n# ${vramComment} — auto-tuned by Finetuna 🐟\nPARAMETER num_ctx ${bestCtx}\nPARAMETER num_gpu ${numGpu}\nPARAMETER num_batch ${bestBatch}\n`;
+    const finalContent = buildModelfileContent({
+      sourceModel,
+      vramComment,
+      numCtx: bestCtx,
+      numGpu,
+      numBatch: bestBatch,
+      finetunaNote: 'auto-tuned by Finetuna 🐟',
+    });
     fs.writeFileSync(modelfilePath, finalContent);
     spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
     console.log('\n   ✅ Final model created with optimal settings!');
@@ -774,7 +825,7 @@ async function main() {
       timestamp: new Date().toISOString(),
       model: newName,
       source: sourceModel,
-      settings: { bestBatch, bestCtx, numGpu },
+      settings: { bestBatch, bestCtx, numGpu, openClaw: FLAGS.openClaw },
       batchResults,
       ctxResults,
     };
@@ -808,7 +859,13 @@ async function main() {
 
       console.log(`\n🔄 Recreating ${newName} with num_ctx = ${currentCtx} ...`);
       const fallbackBatch = bestBatch != null ? bestBatch : parseInt(numBatch, 10) || 512;
-      const newContent = `FROM ${sourceModel}\n\n# ${vramComment}\nPARAMETER num_ctx ${currentCtx}\nPARAMETER num_gpu ${numGpu}\nPARAMETER num_batch ${fallbackBatch}\n`;
+      const newContent = buildModelfileContent({
+        sourceModel,
+        vramComment,
+        numCtx: currentCtx,
+        numGpu,
+        numBatch: fallbackBatch,
+      });
       fs.writeFileSync(modelfilePath, newContent);
       spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
       console.log('✅ Model recreated with lower context — back in the water!');

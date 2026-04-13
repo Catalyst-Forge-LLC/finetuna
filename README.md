@@ -40,6 +40,8 @@ node finetuna.js
 pnpm start
 ```
 
+- **OpenClaw / Gemma4 clients:** some tools need an explicit `TEMPLATE` plus `RENDERER` / `PARSER` in the Modelfile. Run with `--openclaw` or set `FINETUNA_OPENCLAW=1` to embed the Gemma4-oriented block (`TEMPLATE {{ .Prompt }}`, `RENDERER gemma4`, `PARSER gemma4`, and `temperature` / `top_k` / `top_p`). Use `--no-openclaw` to force it off. This is aimed at Gemma-class base models; other families may need different renderer/parser names later.
+
 - What it does:
   - Detects GPU VRAM when possible (NVIDIA `nvidia-smi`, AMD `rocm-smi`, then a Windows WMI fallback; some systems still need manual context choices).
   - Lists available Ollama models and prompts for a source model and new name.
@@ -89,6 +91,7 @@ Replace `YOUR_USERNAME`/`YOUR_REPO` with your GitHub repo. You can also create t
 - `FINETUNA_TIMEOUT` — timeout for prompt-eval / API calls, in milliseconds. Default: `20000` (20s).
 - `FINETUNA_GEN_TIMEOUT` — timeout for generation benchmarks, in milliseconds. Default: `60000` (60s).
 - `BENCH_REPEATS` — number of repeats per candidate during auto-tune benchmarking. Default: `3`.
+- `FINETUNA_OPENCLAW` — if set to `1`, `true`, or `yes`, same as `--openclaw` (see Notes above). Override with `--no-openclaw`.
 
 Examples — set before running `pnpm start`:
 

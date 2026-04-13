@@ -9,6 +9,8 @@
 
 ## Lower priority / ideas
 
+- **OpenClaw mode** is hardcoded to `gemma4` renderer/parser; support other families or `ollama show --modelfile` merge when needed.
+
 - **Tests.** No automated tests; fragile areas include parsing `ollama list` / `ollama ps`, and JSON shape from `/api/generate`. Smoke tests with mocked `execSync` would help.
 
 - **Binary / `bin` entry.** Optional: add `"bin": { "finetuna": "finetuna.js" }` and a shebang for global `pnpm link` / `npm link` usage.
