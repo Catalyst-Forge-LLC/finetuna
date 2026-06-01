@@ -4,6 +4,8 @@ blobs/
 manifests/
 Modelfile-*
 finetuna-results.json
+finetuna-benchmark.md
+.finetuna-state.json
 .DS_Store
 npm-debug.log
 dist/

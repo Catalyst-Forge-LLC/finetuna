@@ -18,6 +18,17 @@ function parseFlags() {
     skipBatch: false,
     skipCtx: false,
     openClaw: ['1', 'true', 'yes'].includes(String(process.env.FINETUNA_OPENCLAW || '').toLowerCase()),
+    openClawAgent: false,
+    /** null = auto-detect / benchmark; true/false = force */
+    flashAttn: (() => {
+      const v = String(process.env.FINETUNA_FLASH_ATTN || '').toLowerCase();
+      if (v === '1' || v === 'true' || v === 'yes') return true;
+      if (v === '0' || v === 'false' || v === 'no') return false;
+      return null;
+    })(),
+    benchmarkReport: false,
+    unload: false,
+    reload: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -34,13 +45,20 @@ function parseFlags() {
           '  --auto-tune           Skip auto-tune confirmation prompt',
           '  --skip-batch          Skip Phase 1 (num_batch sweep)',
           '  --skip-ctx            Skip Phase 2 (num_ctx sweep)',
-          '  --openclaw            Add Gemma4 TEMPLATE/RENDERER/PARSER + sampling (OpenClaw-friendly)',
+          '  --openclaw            OpenClaw Modelfile preset (64K ctx default, gemma4 template, num_keep 64)',
+          '  --openclaw-agent      Same as --openclaw with temperature 0.1 / top_k 20 (deterministic agents)',
           '  --no-openclaw         Turn off OpenClaw block even if FINETUNA_OPENCLAW is set',
+          '  --flash-attn          Force flash_attn 1 + use_mmap 0 in Modelfile (RTX 20xx+)',
+          '  --no-flash-attn       Disable flash attention injection',
+          '  --benchmark-report    Print markdown benchmark table (+ finetuna-benchmark.md)',
+          '  --unload, --panic     Evict all loaded models from VRAM (keep_alive: 0)',
+          '  --reload              Reload last model from .finetuna-state.json',
           '  --verbose             Print raw ollama list / ollama ps output',
           '',
           'Environment variables (override defaults, flags take precedence):',
           '  OLLAMA_HOST           Ollama HTTP base URL (default http://127.0.0.1:11434)',
           '  FINETUNA_OPENCLAW     If 1/true/yes, same as --openclaw (use --no-openclaw to force off)',
+          '  FINETUNA_FLASH_ATTN   1/true or 0/false to force flash attention (default: auto on RTX 20xx+)',
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
           '  BENCH_REPEATS         Same as --bench-repeats',
@@ -96,8 +114,33 @@ function parseFlags() {
       flags.openClaw = true;
       continue;
     }
+    if (a === '--openclaw-agent') {
+      flags.openClaw = true;
+      flags.openClawAgent = true;
+      continue;
+    }
     if (a === '--no-openclaw') {
       flags.openClaw = false;
+      continue;
+    }
+    if (a === '--flash-attn') {
+      flags.flashAttn = true;
+      continue;
+    }
+    if (a === '--no-flash-attn') {
+      flags.flashAttn = false;
+      continue;
+    }
+    if (a === '--benchmark-report') {
+      flags.benchmarkReport = true;
+      continue;
+    }
+    if (a === '--unload' || a === '--panic') {
+      flags.unload = true;
+      continue;
+    }
+    if (a === '--reload') {
+      flags.reload = true;
       continue;
     }
   }
@@ -145,6 +188,199 @@ function parseGenerateResponseBody(text) {
     }
     return last;
   }
+}
+
+const STATE_FILE = path.join(process.cwd(), '.finetuna-state.json');
+const OPENCLAW_CTX_TIERS = [65536, 49152, 32768, 24576, 16384, 8192, 4096];
+
+/** Extract eval_rate / prompt_eval_rate from Ollama generate JSON (with duration fallback). */
+function ratesFromGenerateData(data) {
+  if (!data) return { evalRate: null, promptEvalRate: null };
+  let evalRate = data.eval_rate != null ? Number(data.eval_rate) : null;
+  if (evalRate == null && data.eval_count && data.eval_duration) {
+    evalRate = data.eval_count / (data.eval_duration / 1e9);
+  }
+  let promptEvalRate = data.prompt_eval_rate != null ? Number(data.prompt_eval_rate) : null;
+  if (promptEvalRate == null && data.prompt_eval_count && data.prompt_eval_duration) {
+    promptEvalRate = data.prompt_eval_count / (data.prompt_eval_duration / 1e9);
+  }
+  const fmt = (n) => (n != null && Number.isFinite(n) ? Number(n.toFixed(1)) : null);
+  return { evalRate: fmt(evalRate), promptEvalRate: fmt(promptEvalRate) };
+}
+
+function formatRate(n) {
+  return n != null && Number.isFinite(n) ? `${n.toFixed(1)} t/s` : 'N/A';
+}
+
+function ctxKLabel(numCtx) {
+  if (numCtx >= 1024 && numCtx % 1024 === 0) return `${numCtx / 1024}k`;
+  return String(numCtx);
+}
+
+function suggestModelName(baseName, numCtx, flashAttn) {
+  const base = baseName.replace(/-ctx[\d.]+k(-flash)?$/i, '').replace(/-finetuna$/i, '');
+  let name = `${base}-ctx${ctxKLabel(numCtx)}`;
+  if (flashAttn) name += '-flash';
+  return name;
+}
+
+function detectFlashAttnSupport() {
+  try {
+    const names = execSync('nvidia-smi --query-gpu=name --format=csv,noheader', { encoding: 'utf8' })
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    return names.some(
+      (n) =>
+        /\bRTX\s+(20|30|40|50)\d/i.test(n) ||
+        /\b(Quadro\s+)?RTX\s+(4000|5000|6000|8000)/i.test(n) ||
+        /\b(Tesla\s+)?(T4|A100|A10|L4|H100|V100|L40)\b/i.test(n),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function queryGpuMemUsedMiB() {
+  try {
+    const raw = execSync('nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits', { encoding: 'utf8' }).trim();
+    return parseInt(raw.split('\n')[0], 10);
+  } catch {
+    return null;
+  }
+}
+
+function readFinetunaState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeFinetunaState(state) {
+  fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2));
+}
+
+async function listLoadedModelsHttp() {
+  const res = await fetch(`${OLLAMA_BASE}/api/ps`);
+  if (!res.ok) throw new Error(`GET /api/ps failed: HTTP ${res.status}`);
+  const data = await res.json();
+  return (data.models || []).map((m) => m.name || m.model).filter(Boolean);
+}
+
+async function evictModelFromVram(modelName) {
+  await fetch(`${OLLAMA_BASE}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: modelName, prompt: '', keep_alive: 0 }),
+    signal: createTimeoutSignal(15000),
+  });
+}
+
+async function unloadLoadedModels() {
+  console.log('\n🐟 Finetuna VRAM panic — evicting loaded models...\n');
+  let models = [];
+  try {
+    models = await listLoadedModelsHttp();
+  } catch (e) {
+    try {
+      const ps = execSync('ollama ps', { encoding: 'utf8' });
+      models = ps
+        .trim()
+        .split('\n')
+        .slice(1)
+        .map((l) => l.trim().split(/\s+/)[0])
+        .filter(Boolean);
+    } catch {
+      console.error('Could not list loaded models:', e.message);
+      process.exit(1);
+    }
+  }
+  if (models.length === 0) {
+    console.log('No models loaded in VRAM.');
+    return;
+  }
+  console.log('Loaded:', models.join(', '));
+  for (const m of models) {
+    process.stdout.write(`   Evicting ${m}… `);
+    try {
+      await evictModelFromVram(m);
+      console.log('done');
+    } catch (err) {
+      console.log(`failed (${err.message})`);
+    }
+  }
+  console.log('\n✅ VRAM cleared. Use --reload to warm the last Finetuna model.');
+}
+
+async function reloadLastModel() {
+  const state = readFinetunaState();
+  if (!state?.model) {
+    console.error('No .finetuna-state.json found (or missing model). Run Finetuna on a model first.');
+    process.exit(1);
+  }
+  console.log(`\n🐟 Reloading ${state.model} into VRAM...\n`);
+  const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: state.model, prompt: 'hi', stream: false, options: { num_predict: 1 } }),
+    signal: createTimeoutSignal(Math.max(FLAGS.genTimeoutMs, 180000)),
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    console.error(`Reload failed: HTTP ${res.status}`, text.slice(0, 200));
+    process.exit(1);
+  }
+  writeFinetunaState(state);
+  console.log(`✅ ${state.model} is loaded (num_ctx=${state.numCtx ?? '?'}, flash=${state.flashAttn ? 'on' : 'off'}).`);
+}
+
+function printSpeedSummary(metrics, { title = 'Performance' } = {}) {
+  console.log(`\n📊 ${title}:`);
+  if (metrics.evalRate != null) console.log(`   eval_rate (gen)     : ${formatRate(metrics.evalRate)}`);
+  if (metrics.promptEvalRate != null) console.log(`   prompt_eval_rate    : ${formatRate(metrics.promptEvalRate)}`);
+  console.log(`   Tokens generated    : ${metrics.tokensGenerated}`);
+  console.log(`   Eval-only TPS       : ${metrics.tpsEval}`);
+  console.log(`   Wall-clock TPS      : ${metrics.tpsWall}`);
+  console.log(`   Total time          : ${metrics.totalTimeSec.toFixed(2)} seconds`);
+}
+
+function printAutoTuneComparison(before, after) {
+  if (!before?.success || !after?.success) return;
+  const bEval = before.evalRate ?? (before.tpsEval !== 'N/A' ? parseFloat(before.tpsEval) : null);
+  const aEval = after.evalRate ?? (after.tpsEval !== 'N/A' ? parseFloat(after.tpsEval) : null);
+  const bPrompt = before.promptEvalRate ?? null;
+  const aPrompt = after.promptEvalRate ?? null;
+  console.log('\n┌──────────────────────┬─────────────┬─────────────┬──────────────┐');
+  console.log('│ Metric               │   Before    │    After    │   Change     │');
+  console.log('├──────────────────────┼─────────────┼─────────────┼──────────────┤');
+  const pct = (b, a) => (b && a && b > 0 ? `${(((a - b) / b) * 100).toFixed(1)}%` : '—');
+  console.log(
+    `│ eval_rate (gen)      │ ${formatRate(bEval).padStart(11)} │ ${formatRate(aEval).padStart(11)} │ ${pct(bEval, aEval).padStart(12)} │`,
+  );
+  console.log(
+    `│ prompt_eval_rate     │ ${formatRate(bPrompt).padStart(11)} │ ${formatRate(aPrompt).padStart(11)} │ ${pct(bPrompt, aPrompt).padStart(12)} │`,
+  );
+  console.log('└──────────────────────┴─────────────┴─────────────┴──────────────┘');
+}
+
+function renderBenchmarkMarkdown(rows, modelName) {
+  const header = '| num_ctx | num_batch | flash_attn | eval_rate (t/s) | prompt_eval_rate (t/s) | VRAM peak (MiB) | num_gpu |';
+  const sep = '| --- | --- | --- | --- | --- | --- | --- |';
+  const lines = rows.map(
+    (r) =>
+      `| ${r.numCtx} | ${r.numBatch} | ${r.flashAttn ? '1' : '0'} | ${r.evalRate ?? '—'} | ${r.promptEvalRate ?? '—'} | ${r.vramPeakMiB ?? '—'} | ${r.numGpu} |`,
+  );
+  return [`# Finetuna benchmark — ${modelName}`, '', `Generated: ${new Date().toISOString()}`, '', header, sep, ...lines, ''].join('\n');
+}
+
+function writeBenchmarkReportFile(rows, modelName) {
+  const md = renderBenchmarkMarkdown(rows, modelName);
+  console.log('\n' + md);
+  const outPath = path.join(process.cwd(), 'finetuna-benchmark.md');
+  fs.writeFileSync(outPath, md);
+  console.log(`\n💾 Benchmark report saved to ${outPath}`);
 }
 
 // Validate model name to prevent command injection (ollama names: alphanumeric, dash, underscore, dot, colon)
@@ -218,10 +454,22 @@ function contextTierShortLabel(n) {
 
 const STRETCH_CTX = 32768;
 
-function getContextOptions(vramGB) {
+function getContextOptions(vramGB, { openClaw = false } = {}) {
   const maxCtx = maxSuggestedCtxFromVram(vramGB);
   const opts = [];
   const seen = new Set();
+
+  if (openClaw) {
+    for (const t of OPENCLAW_CTX_TIERS) {
+      seen.add(t);
+      let label = t === 65536 ? 'OpenClaw target (64K)' : contextTierShortLabel(t);
+      if (t > maxCtx) label += ' — may exceed VRAM hint';
+      opts.push({ name: `${t}  – ${label}`, value: t });
+    }
+    opts.push({ name: 'custom', message: 'Custom (any number you want)' });
+    return opts;
+  }
+
   for (const t of CONTEXT_TIERS) {
     if (t > maxCtx) break;
     seen.add(t);
@@ -257,25 +505,31 @@ function unwrapChoice(choice) {
 }
 
 /**
- * Build Modelfile text. With OpenClaw mode, embeds explicit Gemma4 TEMPLATE / RENDERER / PARSER
- * and sampling PARAMETERs (some API clients require these in the Modelfile).
+ * Build Modelfile text. With OpenClaw mode, embeds explicit Gemma4 TEMPLATE / RENDERER / PARSER,
+ * num_keep 64, and sampling PARAMETERs.
  */
-function buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, finetunaNote = '' }) {
+function buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, finetunaNote = '', flashAttn = false }) {
   const commentLine = finetunaNote ? `# ${vramComment} — ${finetunaNote}` : `# ${vramComment}`;
   const openClawBlock = FLAGS.openClaw
     ? `# OpenClaw compatibility (see --openclaw / FINETUNA_OPENCLAW)
 TEMPLATE {{ .Prompt }}
 RENDERER gemma4
 PARSER gemma4
-PARAMETER temperature 1
-PARAMETER top_k 64
-PARAMETER top_p 0.95
+${FLAGS.openClawAgent ? 'PARAMETER temperature 0.1\nPARAMETER top_k 20\n' : 'PARAMETER temperature 1\nPARAMETER top_k 64\n'}PARAMETER top_p 0.95
+PARAMETER num_keep 64
+
+`
+    : '';
+  const flashBlock = flashAttn
+    ? `# Flash attention (RTX 20xx+ / --flash-attn)
+PARAMETER use_mmap 0
+PARAMETER flash_attn 1
 
 `
     : '';
   return `FROM ${sourceModel}
 
-${openClawBlock}${commentLine}
+${openClawBlock}${flashBlock}${commentLine}
 PARAMETER num_ctx ${numCtx}
 PARAMETER num_gpu ${numGpu}
 PARAMETER num_batch ${numBatch}
@@ -363,22 +617,17 @@ async function checkGPUFit(newName) {
 }
 
 async function runTestPromptWithSpeed(newName) {
-  // Wrapper that prints the metrics for a single sample prompt.
   const metrics = await getSpeedMetrics(newName);
   if (!metrics.success) {
     console.log('⚠️  Could not measure speed (timeout or error). Falling back to simple run...');
     if (metrics.errMsg) console.log('   Error:', metrics.errMsg);
-    return;
+    return metrics;
   }
 
   console.log('\n✅ Response:');
   if (metrics.output) console.log(metrics.output.trim());
-
-  console.log('\n📊 Performance:');
-  console.log(`   Tokens generated : ${metrics.tokensGenerated}`);
-  console.log(`   Eval-only TPS    : ${metrics.tpsEval}`);
-  console.log(`   Wall-clock TPS   : ${metrics.tpsWall}`);
-  console.log(`   Total time       : ${metrics.totalTimeSec.toFixed(2)} seconds`);
+  printSpeedSummary(metrics);
+  return metrics;
 }
 
 // Longer prompt used for TTFT / prompt-eval benchmarking (num_batch matters here)
@@ -456,11 +705,22 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     const tokensGenerated = data.eval_count || 0;
     const evalDurationMs = (data.eval_duration || 0) / 1_000_000;
     const totalTimeSec = (end - start) / 1000;
-    const tpsEval = tokensGenerated && evalDurationMs ? (tokensGenerated / (evalDurationMs / 1000)).toFixed(1) : 'N/A';
+    const { evalRate, promptEvalRate } = ratesFromGenerateData(data);
+    const tpsEval =
+      evalRate != null ? evalRate.toFixed(1) : tokensGenerated && evalDurationMs ? (tokensGenerated / (evalDurationMs / 1000)).toFixed(1) : 'N/A';
     const tpsWall = tokensGenerated && totalTimeSec ? (tokensGenerated / totalTimeSec).toFixed(1) : 'N/A';
     return {
       ok: true,
-      result: { success: true, output: outputText, tokensGenerated, tpsEval, tpsWall, totalTimeSec },
+      result: {
+        success: true,
+        output: outputText,
+        tokensGenerated,
+        tpsEval,
+        tpsWall,
+        totalTimeSec,
+        evalRate,
+        promptEvalRate,
+      },
       start,
     };
   }
@@ -514,10 +774,16 @@ async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
     const promptTokens = data.prompt_eval_count || 0;
     const promptDurationNs = data.prompt_eval_duration || 0;
     const promptDurationMs = promptDurationNs / 1_000_000;
-    const promptTps = promptTokens && promptDurationMs ? (promptTokens / (promptDurationMs / 1000)).toFixed(1) : 'N/A';
+    const { promptEvalRate } = ratesFromGenerateData(data);
+    const promptTps =
+      promptEvalRate != null
+        ? promptEvalRate.toFixed(1)
+        : promptTokens && promptDurationMs
+          ? (promptTokens / (promptDurationMs / 1000)).toFixed(1)
+          : 'N/A';
     const ttftMs = promptDurationMs;
 
-    return { success: true, promptTokens, promptDurationMs, promptTps, ttftMs };
+    return { success: true, promptTokens, promptDurationMs, promptTps, promptEvalRate, ttftMs };
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'Request timed out' : err.message || String(err);
     return { success: false, errMsg: msg };
@@ -530,10 +796,11 @@ async function benchmarkPromptEval(newName, repeats = FLAGS.benchRepeats, label 
   for (let i = 0; i < repeats; i++) {
     process.stdout.write(`   ${label}Run ${i + 1}/${repeats}… `);
     const m = await getPromptEvalMetrics(newName);
-    if (m.success && m.promptTps !== 'N/A') {
-      const tps = parseFloat(m.promptTps);
+    const tps = m.success ? (m.promptEvalRate ?? (m.promptTps !== 'N/A' ? parseFloat(m.promptTps) : 0)) : 0;
+    if (m.success && tps > 0) {
       results.push(tps);
-      console.log(`${tps.toFixed(1)} tok/s ingestion · ${m.ttftMs.toFixed(0)}ms to first token · ${m.promptTokens} prompt tokens`);
+      const rateStr = m.promptEvalRate != null ? `${m.promptEvalRate.toFixed(1)} prompt_eval_rate` : `${tps.toFixed(1)} tok/s ingestion`;
+      console.log(`${rateStr} · ${m.ttftMs.toFixed(0)}ms to first token · ${m.promptTokens} prompt tokens`);
     } else {
       results.push(0);
       console.log('failed');
@@ -554,10 +821,11 @@ async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '')
   for (let i = 0; i < repeats; i++) {
     process.stdout.write(`   ${label}Run ${i + 1}/${repeats}… `);
     const m = await getSpeedMetrics(newName);
-    if (m.success && m.tpsWall !== 'N/A') {
-      const tps = parseFloat(m.tpsWall);
+    const tps = m.success ? (m.evalRate ?? (m.tpsEval !== 'N/A' ? parseFloat(m.tpsEval) : m.tpsWall !== 'N/A' ? parseFloat(m.tpsWall) : 0)) : 0;
+    if (m.success && tps > 0) {
       results.push(tps);
-      console.log(`${tps.toFixed(1)} t/s`);
+      const rateStr = m.evalRate != null ? `${m.evalRate.toFixed(1)} eval_rate` : `${tps.toFixed(1)} t/s`;
+      console.log(rateStr);
     } else {
       results.push(0);
       console.log('failed');
@@ -573,15 +841,109 @@ async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '')
   return avg;
 }
 
+async function sampleBenchmarkRates(newName) {
+  const [gen, prompt] = await Promise.all([getSpeedMetrics(newName), getPromptEvalMetrics(newName)]);
+  let vramPeakMiB = queryGpuMemUsedMiB();
+  return {
+    evalRate: gen.success ? gen.evalRate : null,
+    promptEvalRate: prompt.success ? prompt.promptEvalRate : null,
+    vramPeakMiB,
+  };
+}
+
+async function benchmarkFlashAttn({
+  newName,
+  modelfilePath,
+  sourceModel,
+  vramComment,
+  numCtx,
+  numGpu,
+  numBatch,
+  repeatCount,
+}) {
+  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('  Phase 3: flash_attn A/B (eval_rate)');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  async function runWith(flashAttn) {
+    const content = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn });
+    fs.writeFileSync(modelfilePath, content);
+    const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
+    if (createResult.status !== 0) return 0;
+    const gpuOk = await checkGPUFit(newName);
+    if (!gpuOk) return 0;
+    return benchmarkModel(newName, repeatCount, flashAttn ? '[flash=1] ' : '[flash=0] ');
+  }
+
+  const without = await runWith(false);
+  const withFlash = await runWith(true);
+  console.log(`\n   flash_attn=0 → ${without.toFixed(1)} t/s avg`);
+  console.log(`   flash_attn=1 → ${withFlash.toFixed(1)} t/s avg`);
+  const useFlash = withFlash > without;
+  console.log(useFlash ? '\n   ✅ Keeping flash_attn=1 (faster)' : '\n   ✅ Keeping flash_attn=0 (faster or equal)');
+  const content = buildModelfileContent({
+    sourceModel,
+    vramComment,
+    numCtx,
+    numGpu,
+    numBatch,
+    flashAttn: useFlash,
+    finetunaNote: 'auto-tuned by Finetuna 🐟',
+  });
+  fs.writeFileSync(modelfilePath, content);
+  spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
+  return { useFlash, without, withFlash };
+}
+
+async function maybeRenameWithSuggested(currentName, sourceModel, numCtx, flashAttn) {
+  const suggested = suggestModelName(sourceModel.split(':')[0], numCtx, flashAttn);
+  if (suggested === currentName) return currentName;
+  const r = await prompt([
+    {
+      type: 'confirm',
+      name: 'useSuggested',
+      message: `Save as "${suggested}"? (self-documenting name for ollama list)`,
+      initial: true,
+    },
+  ]);
+  if (!r.useSuggested) return currentName;
+  const cp = spawnSync('ollama', ['cp', currentName, suggested], { encoding: 'utf8' });
+  if (cp.status !== 0) {
+    console.log(`   ⚠️  Could not copy to ${suggested} — keeping ${currentName}`);
+    return currentName;
+  }
+  console.log(`   ✅ Model also available as "${suggested}"`);
+  return suggested;
+}
+
 async function main() {
+  if (FLAGS.unload) {
+    await unloadLoadedModels();
+    return;
+  }
+  if (FLAGS.reload) {
+    await reloadLastModel();
+    return;
+  }
+
   console.log('\n🐟 Finetuna — The Ollama Model Tuner');
   console.log('=====================================\n');
   console.log("You can tune a guitar... but you can't tunafish! Let's fine-tune some models! 🐟\n");
 
+  const flashSupported = detectFlashAttnSupport();
+  let sessionFlashAttn = false;
+  const benchmarkRows = [];
+
   if (FLAGS.openClaw) {
+    const agentNote = FLAGS.openClawAgent ? ' (agent sampling: temperature 0.1, top_k 20)' : '';
     console.log(
-      'OpenClaw mode: Modelfile will include TEMPLATE + RENDERER/PARSER gemma4 + temperature/top_k/top_p (intended for Gemma-class models).\n',
+      `OpenClaw mode: 64K context default, num_keep 64, gemma4 TEMPLATE/RENDERER/PARSER${agentNote}.\n`,
     );
+  }
+  if (flashSupported) {
+    console.log('Flash attention: supported GPU detected (RTX 20xx+ class).\n');
+  } else if (FLAGS.flashAttn === true) {
+    console.log('⚠️  --flash-attn set but no supported NVIDIA GPU detected — will still inject flags.\n');
   }
 
   const vramGB = detectVRAM();
@@ -641,15 +1003,48 @@ async function main() {
   ]);
   const newName = sanitizeName(rawNewName.trim());
 
-  const ctxOptions = getContextOptions(vramGB);
+  if (FLAGS.openClaw) {
+    const maxCtx = maxSuggestedCtxFromVram(vramGB);
+    if (maxCtx < 65536) {
+      console.log(
+        '⚠️  OpenClaw recommends 65536 context. Your VRAM hint suggests a lower ceiling — 64K may not fit.\n' +
+          '   Try a smaller model or Q4_K_M quantization if auto-tune cannot reach 100% GPU at 64K.\n',
+      );
+    }
+  }
+
+  const ctxOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw });
+  let ctxInitial = 0;
+  if (FLAGS.openClaw) {
+    const idx64 = ctxOptions.findIndex((o) => o.value === 65536);
+    if (idx64 >= 0) ctxInitial = idx64;
+  }
   const { ctxChoice } = await prompt([
-    { type: 'select', name: 'ctxChoice', message: 'Choose a context window size (num_ctx) — pick wisely, little tuna:', choices: ctxOptions },
+    {
+      type: 'select',
+      name: 'ctxChoice',
+      message: FLAGS.openClaw
+        ? 'OpenClaw context (num_ctx) — 64K target, step down if VRAM is tight:'
+        : 'Choose a context window size (num_ctx) — pick wisely, little tuna:',
+      choices: ctxOptions,
+      initial: ctxInitial,
+    },
   ]);
 
   const rawCtx = unwrapChoice(ctxChoice);
   let numCtx =
     rawCtx === 'custom'
-      ? parseInt((await prompt([{ type: 'input', name: 'customCtx', message: 'Custom context size (any number):', initial: '32768' }])).customCtx, 10)
+      ? parseInt(
+          (await prompt([
+            {
+              type: 'input',
+              name: 'customCtx',
+              message: 'Custom context size (any number):',
+              initial: FLAGS.openClaw ? '65536' : '32768',
+            },
+          ])).customCtx,
+          10,
+        )
       : rawCtx;
   if (!Number.isFinite(numCtx) || numCtx < 256) {
     console.error('Invalid context size; using 8192.');
@@ -659,8 +1054,24 @@ async function main() {
   const { numBatch } = await prompt([{ type: 'input', name: 'numBatch', message: 'Batch size (num_batch) – higher = faster generation:', initial: '512' }]);
   const { numGpu } = await prompt([{ type: 'input', name: 'numGpu', message: 'GPU layers (num_gpu) – 999 = max possible:', initial: '999' }]);
 
+  if (FLAGS.flashAttn === true) {
+    sessionFlashAttn = true;
+  } else if (FLAGS.flashAttn === false) {
+    sessionFlashAttn = false;
+  } else if (flashSupported) {
+    const r = await prompt([
+      {
+        type: 'confirm',
+        name: 'useFlash',
+        message: 'Inject flash_attn 1 + use_mmap 0 for this model? (recommended on RTX 20xx+)',
+        initial: true,
+      },
+    ]);
+    sessionFlashAttn = r.useFlash;
+  }
+
   const vramComment = vramGB ? `Optimized for ${vramGB}GB VRAM (auto-detected)` : 'Optimized for your GPU';
-  const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch });
+  const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn: sessionFlashAttn });
 
   const modelfilePath = path.join(process.cwd(), 'Modelfile-finetuna');
   fs.writeFileSync(modelfilePath, modelfileContent);
@@ -673,8 +1084,12 @@ async function main() {
   let fullGPU = false;
   let currentCtx = numCtx;
   let bestBatch = null;
+  let beforeMetrics = null;
+  let afterMetrics = null;
+  let flashAbResult = null;
 
-  // After initial creation, offer optional auto-tune
+  console.log('\n📏 Baseline speed (before auto-tune)...');
+  beforeMetrics = await runTestPromptWithSpeed(newName);
   let autoTune = FLAGS.autoTune;
   if (!autoTune) {
     const r = await prompt([
@@ -724,7 +1139,7 @@ async function main() {
       for (let ci = 0; ci < batchCandidates.length; ci++) {
         const cand = batchCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${batchCandidates.length}] num_batch = ${cand}`);
-        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: currentCtx, numGpu, numBatch: cand });
+        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: currentCtx, numGpu, numBatch: cand, flashAttn: sessionFlashAttn });
         fs.writeFileSync(modelfilePath, content);
         const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
         if (createResult.status !== 0) {
@@ -791,10 +1206,15 @@ async function main() {
         },
       ]);
 
-      // Build context candidates: start from smallest, go up to double the chosen ctx
-      const ctxCandidates = Array.from(new Set([4096, 8192, 12288, 16384, 24576, 32768, currentCtx].filter((c) => c <= currentCtx * 2 && c >= 2048))).sort(
-        (a, b) => a - b,
-      );
+      // Build context candidates
+      let ctxCandidates;
+      if (FLAGS.openClaw) {
+        ctxCandidates = OPENCLAW_CTX_TIERS.filter((c) => c <= currentCtx && c >= 2048);
+      } else {
+        ctxCandidates = Array.from(
+          new Set([4096, 8192, 12288, 16384, 24576, 32768, currentCtx].filter((c) => c <= currentCtx * 2 && c >= 2048)),
+        ).sort((a, b) => a - b);
+      }
 
       console.log('   Strategy:   ' + (ctxGoal === 'max-context' ? 'Largest context that fits 100% GPU' : 'Fastest generation speed at 100% GPU'));
       console.log('   Candidates: ' + ctxCandidates.join(', '));
@@ -804,7 +1224,7 @@ async function main() {
       for (let ci = 0; ci < ctxCandidates.length; ci++) {
         const cand = ctxCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${ctxCandidates.length}] num_ctx = ${cand}`);
-        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: cand, numGpu, numBatch: bestBatch });
+        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: cand, numGpu, numBatch: bestBatch, flashAttn: sessionFlashAttn });
         fs.writeFileSync(modelfilePath, content);
         const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
         if (createResult.status !== 0) {
@@ -813,12 +1233,14 @@ async function main() {
           continue;
         }
 
-        // Check GPU fit first
         const gpuOk = await checkGPUFit(newName);
         if (!gpuOk) {
-          console.log(`   ⚠️  num_ctx=${cand} doesn't fit 100% GPU — bailing on remaining larger sizes`);
+          console.log(`   ⚠️  num_ctx=${cand} doesn't fit 100% GPU — skipping`);
           ctxResults.push({ cand, avg: 0, gpu: false });
-          // All larger ctx values will also fail, so skip them
+          if (FLAGS.openClaw) {
+            continue;
+          }
+          console.log('   Bailing on remaining larger sizes');
           for (let ri = ci + 1; ri < ctxCandidates.length; ri++) {
             ctxResults.push({ cand: ctxCandidates[ri], avg: 0, gpu: false });
           }
@@ -892,20 +1314,60 @@ async function main() {
       numCtx: bestCtx,
       numGpu,
       numBatch: bestBatch,
+      flashAttn: sessionFlashAttn,
       finetunaNote: 'auto-tuned by Finetuna 🐟',
     });
     fs.writeFileSync(modelfilePath, finalContent);
     spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
     console.log('\n   ✅ Final model created with optimal settings!');
 
+    if (flashSupported && FLAGS.flashAttn === null) {
+      flashAbResult = await benchmarkFlashAttn({
+        newName,
+        modelfilePath,
+        sourceModel,
+        vramComment,
+        numCtx: bestCtx,
+        numGpu,
+        numBatch: bestBatch,
+        repeatCount,
+      });
+      sessionFlashAttn = flashAbResult.useFlash;
+    }
+
+    console.log('\n📏 Speed after auto-tune...');
+    afterMetrics = await runTestPromptWithSpeed(newName);
+    printAutoTuneComparison(beforeMetrics, afterMetrics);
+
+    if (FLAGS.benchmarkReport || benchmarkRows.length > 0) {
+      const sample = await sampleBenchmarkRates(newName);
+      benchmarkRows.push({
+        numCtx: bestCtx,
+        numBatch: bestBatch,
+        numGpu,
+        flashAttn: sessionFlashAttn,
+        evalRate: sample.evalRate,
+        promptEvalRate: sample.promptEvalRate,
+        vramPeakMiB: sample.vramPeakMiB,
+      });
+    }
+
     // Write benchmark results to JSON log
     const resultsLog = {
       timestamp: new Date().toISOString(),
       model: newName,
       source: sourceModel,
-      settings: { bestBatch, bestCtx, numGpu, openClaw: FLAGS.openClaw },
+      settings: { bestBatch, bestCtx, numGpu, openClaw: FLAGS.openClaw, openClawAgent: FLAGS.openClawAgent, flashAttn: sessionFlashAttn },
+      before: beforeMetrics?.success
+        ? { evalRate: beforeMetrics.evalRate, promptEvalRate: beforeMetrics.promptEvalRate, tpsEval: beforeMetrics.tpsEval }
+        : null,
+      after: afterMetrics?.success
+        ? { evalRate: afterMetrics.evalRate, promptEvalRate: afterMetrics.promptEvalRate, tpsEval: afterMetrics.tpsEval }
+        : null,
+      flashAb: flashAbResult,
       batchResults,
       ctxResults,
+      benchmarkRows,
     };
     const resultsPath = path.join(process.cwd(), 'finetuna-results.json');
     fs.writeFileSync(resultsPath, JSON.stringify(resultsLog, null, 2));
@@ -913,7 +1375,7 @@ async function main() {
   }
 
   while (!fullGPU) {
-    await runTestPromptWithSpeed(newName);
+    if (!autoTune) await runTestPromptWithSpeed(newName);
     fullGPU = await checkGPUFit(newName);
 
     if (!fullGPU) {
@@ -922,7 +1384,7 @@ async function main() {
       ]);
       if (!reduce) break;
 
-      const lowerOptions = getContextOptions(vramGB).filter((o) => o.value !== 'custom' && o.value < currentCtx);
+      const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter((o) => o.value !== 'custom' && o.value < currentCtx);
       if (lowerOptions.length === 0) lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
 
       const { newCtxChoice } = await prompt([{ type: 'select', name: 'newCtxChoice', message: 'Pick a lower context size to try:', choices: lowerOptions }]);
@@ -943,6 +1405,7 @@ async function main() {
         numCtx: currentCtx,
         numGpu,
         numBatch: fallbackBatch,
+        flashAttn: sessionFlashAttn,
       });
       fs.writeFileSync(modelfilePath, newContent);
       spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
@@ -952,8 +1415,37 @@ async function main() {
     }
   }
 
+  let finalName = await maybeRenameWithSuggested(newName, sourceModel, currentCtx, sessionFlashAttn);
+
+  writeFinetunaState({
+    model: finalName,
+    source: sourceModel,
+    numCtx: currentCtx,
+    numBatch: bestBatch != null ? bestBatch : parseInt(numBatch, 10) || 512,
+    numGpu,
+    flashAttn: sessionFlashAttn,
+    openClaw: FLAGS.openClaw,
+  });
+
+  if (FLAGS.benchmarkReport) {
+    if (benchmarkRows.length === 0) {
+      const sample = await sampleBenchmarkRates(finalName);
+      benchmarkRows.push({
+        numCtx: currentCtx,
+        numBatch: bestBatch != null ? bestBatch : parseInt(numBatch, 10) || 512,
+        numGpu,
+        flashAttn: sessionFlashAttn,
+        evalRate: sample.evalRate,
+        promptEvalRate: sample.promptEvalRate,
+        vramPeakMiB: sample.vramPeakMiB,
+      });
+    }
+    writeBenchmarkReportFile(benchmarkRows, finalName);
+  }
+
   console.log(`\n🎉 Finetuna complete! Your model is perfectly seasoned and ready to swim. 🐟`);
-  console.log(`   Run it anytime with: ollama run ${newName}`);
+  console.log(`   Run it anytime with: ollama run ${finalName}`);
+  console.log(`   Free VRAM quickly: node finetuna.js --unload`);
   console.log(`\nYour Modelfile is saved as "Modelfile-finetuna" — tweak it anytime!`);
 }
 
