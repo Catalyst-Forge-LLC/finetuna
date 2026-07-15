@@ -753,9 +753,16 @@ function buildModelSelectChoices(modelNames, tagsByName, vramGB) {
   const choices = [];
   let lastTier = null;
   const sepFor = (tier) => {
-    if (tier === 'tight') return '── tight (little room for context) ──';
-    if (tier === 'wont_fit') return '── likely too large for this GPU ──';
-    if (tier === 'cloud') return '── cloud / remote ──';
+    // role:heading skips gray disabled styling; pre-color so sections stay readable.
+    if (tier === 'tight') {
+      return colors.yellow.bold('── tight (little room for context) ──');
+    }
+    if (tier === 'wont_fit') {
+      return colors.red.bold('── likely too large for this GPU ──');
+    }
+    if (tier === 'cloud') {
+      return colors.cyan.bold('── cloud / remote ──');
+    }
     return null;
   };
 
@@ -763,7 +770,7 @@ function buildModelSelectChoices(modelNames, tagsByName, vramGB) {
     if (fit.tier !== lastTier) {
       const sep = sepFor(fit.tier);
       if (sep && (fit.tier === 'tight' || fit.tier === 'wont_fit' || fit.tier === 'cloud')) {
-        choices.push({ role: 'separator', message: sep, line: sep });
+        choices.push({ role: 'heading', message: sep });
       }
       lastTier = fit.tier;
     }
