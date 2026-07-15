@@ -23,7 +23,7 @@ Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on
 
 ## What a run looks like
 
-1. Choose a source model and a new name  
+1. Choose a source model and a new name (list grouped vs your VRAM: tight / likely too large / cloud)  
 2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft VRAM guide are labeled ambitious — not a hard limit)  
 3. Finetuna writes **`Modelfile-finetuna`** and runs **`ollama create`**  
 4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false` for clean benches)  

@@ -640,6 +640,143 @@ function detectVRAM() {
   }
 }
 
+const GiB = 1024 ** 3;
+
+/** Local model metadata from GET /api/tags (size, params, quant, capabilities). */
+async function fetchOllamaTagsByName() {
+  const res = await fetch(`${OLLAMA_BASE}/api/tags`, { signal: createTimeoutSignal(15000) });
+  if (!res.ok) throw new Error(`GET /api/tags failed: HTTP ${res.status}`);
+  const data = await res.json();
+  const byName = new Map();
+  for (const m of data.models || []) {
+    const name = m.name || m.model;
+    if (!name) continue;
+    byName.set(name, m);
+    // Also index bare name without :latest
+    if (name.endsWith(':latest')) byName.set(name.slice(0, -7), m);
+  }
+  return byName;
+}
+
+function parseParamBillions(meta, name) {
+  const ps = meta?.details?.parameter_size;
+  if (ps) {
+    const b = String(ps).match(/([\d.]+)\s*B\b/i);
+    if (b) return parseFloat(b[1]);
+    const mil = String(ps).match(/([\d.]+)\s*M\b/i);
+    if (mil) return parseFloat(mil[1]) / 1000;
+  }
+  const fromName = String(name).match(/(?:^|[:\-/_.])(\d+(?:\.\d+)?)[bB](?:$|[^a-zA-Z])/);
+  return fromName ? parseFloat(fromName[1]) : null;
+}
+
+function isCloudModel(name, meta) {
+  if (/:cloud\b/i.test(name) || /\bcloud\b/i.test(String(meta?.remote || ''))) return true;
+  const caps = meta?.capabilities || [];
+  return caps.includes('cloud');
+}
+
+/**
+ * Soft fit hint vs detected VRAM using on-disk size (≈ weights) + param count + vision.
+ * Not a guarantee — GPU-fit after load is authoritative.
+ * @returns {{ tier: 'ok'|'tight'|'wont_fit'|'cloud'|'unknown', sizeGB: number|null, paramsB: number|null, vision: boolean, hint: string }}
+ */
+function classifyModelFit(name, meta, vramGB) {
+  const sizeGB = meta?.size != null ? meta.size / GiB : null;
+  const paramsB = parseParamBillions(meta, name);
+  const caps = meta?.capabilities || [];
+  const family = meta?.details?.family || meta?.details?.families?.[0] || '';
+  const vision = caps.includes('vision') || /^gemma4$/i.test(family) || /gemma4/i.test(name);
+  const quant = meta?.details?.quantization_level || '';
+
+  if (isCloudModel(name, meta)) {
+    return { tier: 'cloud', sizeGB, paramsB, vision, hint: 'cloud — not local GPU' };
+  }
+  if (vramGB == null || vramGB < 1) {
+    const bits = [];
+    if (sizeGB != null) bits.push(`~${sizeGB.toFixed(1)}GB`);
+    if (paramsB != null) bits.push(`${paramsB}B`);
+    if (vision) bits.push('vision');
+    return { tier: 'unknown', sizeGB, paramsB, vision, hint: bits.join(' · ') };
+  }
+
+  const ratio = sizeGB != null ? sizeGB / vramGB : null;
+  // Multimodal / projector models need more free VRAM than disk size alone suggests.
+  const wontFit =
+    (ratio != null && ratio > 1.05) ||
+    (paramsB != null && paramsB >= 14 && vramGB <= 12) ||
+    (paramsB != null && paramsB >= 12 && vramGB <= 8 && (vision || ratio == null || ratio > 0.75)) ||
+    (vision && ratio != null && ratio > 0.9);
+
+  const tight =
+    !wontFit &&
+    ((ratio != null && ratio > 0.68) ||
+      (vision && ratio != null && ratio > 0.5) ||
+      (paramsB != null && paramsB >= 12 && vramGB <= 10) ||
+      (paramsB != null && paramsB >= 9 && vision && vramGB <= 8 && ratio != null && ratio > 0.55));
+
+  const bits = [];
+  if (sizeGB != null) bits.push(`~${sizeGB.toFixed(1)}GB`);
+  else if (paramsB != null) bits.push(`~${paramsB}B`);
+  if (quant) bits.push(quant);
+  if (vision) bits.push('vision');
+
+  if (wontFit) {
+    bits.push(`likely OOM on ${vramGB}GB`);
+    return { tier: 'wont_fit', sizeGB, paramsB, vision, hint: bits.join(' · ') };
+  }
+  if (tight) {
+    bits.push(`tight on ${vramGB}GB`);
+    return { tier: 'tight', sizeGB, paramsB, vision, hint: bits.join(' · ') };
+  }
+  return { tier: 'ok', sizeGB, paramsB, vision, hint: bits.join(' · ') };
+}
+
+const FIT_TIER_ORDER = { ok: 0, unknown: 1, tight: 2, wont_fit: 3, cloud: 4 };
+
+function buildModelSelectChoices(modelNames, tagsByName, vramGB) {
+  const annotated = modelNames.map((name) => {
+    const meta = tagsByName.get(name) || tagsByName.get(name.replace(/:latest$/, '')) || null;
+    const fit = classifyModelFit(name, meta, vramGB);
+    return { name, fit };
+  });
+
+  annotated.sort((a, b) => {
+    const td = FIT_TIER_ORDER[a.fit.tier] - FIT_TIER_ORDER[b.fit.tier];
+    if (td !== 0) return td;
+    const sa = a.fit.sizeGB ?? 999;
+    const sb = b.fit.sizeGB ?? 999;
+    if (sa !== sb) return sa - sb;
+    return a.name.localeCompare(b.name);
+  });
+
+  const choices = [];
+  let lastTier = null;
+  const sepFor = (tier) => {
+    if (tier === 'tight') return '── tight (little room for context) ──';
+    if (tier === 'wont_fit') return '── likely too large for this GPU ──';
+    if (tier === 'cloud') return '── cloud / remote ──';
+    return null;
+  };
+
+  for (const { name, fit } of annotated) {
+    if (fit.tier !== lastTier) {
+      const sep = sepFor(fit.tier);
+      if (sep && (fit.tier === 'tight' || fit.tier === 'wont_fit' || fit.tier === 'cloud')) {
+        choices.push({ role: 'separator', message: sep, line: sep });
+      }
+      lastTier = fit.tier;
+    }
+    const prefix = fit.tier === 'wont_fit' ? '⚠ ' : fit.tier === 'tight' ? '· ' : fit.tier === 'cloud' ? '☁ ' : '  ';
+    choices.push({
+      name,
+      message: `${prefix}${name}`,
+      hint: fit.hint || undefined,
+    });
+  }
+  return { choices, annotated };
+}
+
 /** Ascending context sizes offered in prompts (common Ollama / llama.cpp steps). */
 const CONTEXT_TIERS = [4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072];
 
@@ -1219,11 +1356,50 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Found ${models.length} model(s) swimming around!\n`);
+  let modelChoices = models;
+  let tagsByName = new Map();
+  try {
+    tagsByName = await fetchOllamaTagsByName();
+    const built = buildModelSelectChoices(models, tagsByName, vramGB);
+    modelChoices = built.choices;
+    const flagged = built.annotated.filter((a) => a.fit.tier === 'tight' || a.fit.tier === 'wont_fit' || a.fit.tier === 'cloud');
+    console.log(`Found ${models.length} model(s).`);
+    if (vramGB != null && flagged.length) {
+      console.log(
+        `Grouped by fit vs ~${vramGB}GB VRAM (on-disk size ≈ weights; vision needs more). Still selectable — GPU-fit is authoritative.\n`,
+      );
+    } else {
+      console.log('');
+    }
+  } catch (err) {
+    console.log(`Found ${models.length} model(s) swimming around!`);
+    if (FLAGS.verbose) console.log(`   [verbose] /api/tags unavailable (${err.message}); plain list.\n`);
+    else console.log('');
+  }
 
   const { sourceModel } = await prompt([
-    { type: 'select', name: 'sourceModel', message: 'Which model shall we season and release into the shoal? 🐟', choices: models },
+    {
+      type: 'select',
+      name: 'sourceModel',
+      message: 'Which model shall we season and release into the shoal? 🐟',
+      choices: modelChoices,
+    },
   ]);
+
+  const sourceFit = classifyModelFit(
+    sourceModel,
+    tagsByName.get(sourceModel) || tagsByName.get(sourceModel.replace(/:latest$/, '')) || null,
+    vramGB,
+  );
+  if (sourceFit.tier === 'wont_fit') {
+    console.log(`\n⚠️  ${sourceModel} looks too large for ~${vramGB}GB (${sourceFit.hint}).`);
+    console.log('   You can continue, but expect load OOM — prefer a smaller sibling if you have one.\n');
+  } else if (sourceFit.tier === 'cloud') {
+    console.log(`\n⚠️  ${sourceModel} looks like a cloud/remote model — local GPU tuning may not apply.\n`);
+  } else if (sourceFit.tier === 'tight') {
+    console.log(`\n· ${sourceModel} is tight on ~${vramGB}GB (${sourceFit.hint}) — start with modest num_ctx.\n`);
+  }
+
   const { newName: rawNewName } = await prompt([
     {
       type: 'input',
