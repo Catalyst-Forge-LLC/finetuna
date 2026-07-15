@@ -1,8 +1,26 @@
-import enquirerPkg from 'enquirer';
-const { prompt } = enquirerPkg;
+import Enquirer from 'enquirer';
+import { createRequire } from 'module';
 import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+
+const require = createRequire(import.meta.url);
+const colors = require('ansi-colors');
+
+// High-contrast Enquirer palette (default cyan.dim placeholders are nearly invisible on dark terminals)
+const enquirer = new Enquirer({
+  styles: {
+    primary: colors.whiteBright.bold,
+    answered: colors.cyanBright,
+    placeholder: colors.whiteBright,
+    muted: colors.white,
+    info: colors.cyanBright,
+    pending: colors.whiteBright.bold,
+    dark: colors.gray,
+    disabled: colors.gray,
+  },
+});
+const prompt = (questions) => enquirer.prompt(questions);
 
 // https://grok.com/share/bGVnYWN5_c4d382dd-9452-4610-bff8-3cdbe9a4fb5d
 

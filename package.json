@@ -13,6 +13,7 @@
     "start": "node finetuna.js"
   },
   "dependencies": {
+    "ansi-colors": "^4.1.3",
     "enquirer": "^2.3.6"
   }
 }
