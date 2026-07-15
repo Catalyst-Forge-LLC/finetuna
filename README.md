@@ -24,7 +24,7 @@ Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on
 ## What a run looks like
 
 1. Choose a source model and a new name  
-2. Pick context / batch / GPU layers (presets through **128K**; stretch sizes labeled when above the VRAM hint)  
+2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft VRAM guide are labeled ambitious — not a hard limit)  
 3. Finetuna writes **`Modelfile-finetuna`** and runs **`ollama create`**  
 4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false` for clean benches)  
 5. Optionally auto-tunes `num_batch` then `num_ctx`, with before/after rates  
@@ -126,7 +126,7 @@ pnpm start
 
 ## Tips
 
-- **VRAM hints** are best-effort. Context presets go through **128K**; sizes above the hint are labeled stretch.
+- **VRAM hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU`) is the real check. Presets go through **128K**.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.
 - **Auto-tune** recreates the model many times — use a lower `BENCH_REPEATS` for a quicker pass.
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`

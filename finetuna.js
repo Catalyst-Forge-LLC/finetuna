@@ -535,12 +535,18 @@ function detectVRAM() {
 const CONTEXT_TIERS = [4096, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072];
 
 /**
- * Soft ceiling for the context picker from total VRAM (GB). Not model-specific; rough guide only.
- * Uses vramGB * 2048 (capped at 131072) so larger GPUs see larger preset steps before Custom.
+ * Soft labeling guide for the context picker (NOT a hard limit, NOT model-aware).
+ * Old vram*2048 was far too low (8GB → 16K) while small/quantized models often hold
+ * 64K+ at 100% GPU. Used only to annotate "ambitious" presets.
  */
 function maxSuggestedCtxFromVram(vramGB) {
   if (vramGB == null || vramGB < 1) return 65536;
-  return Math.min(131072, Math.round(vramGB * 2048));
+  // Tiered soft guide — prefers under-warning over false "won't fit" labels
+  if (vramGB <= 4) return 32768;
+  if (vramGB <= 6) return 49152;
+  if (vramGB <= 8) return 65536;
+  if (vramGB <= 12) return 98304;
+  return 131072;
 }
 
 function contextTierShortLabel(n) {
@@ -555,8 +561,6 @@ function contextTierShortLabel(n) {
   if (n <= 98304) return 'Extreme';
   return 'Maximum tier';
 }
-
-const STRETCH_CTX_FLOOR = 65536;
 
 /**
  * Build num_ctx sweep plan pivoted on the user's chosen size:
@@ -578,20 +582,17 @@ function getContextOptions(vramGB, { openClaw = false } = {}) {
   if (openClaw) {
     for (const t of OPENCLAW_CTX_TIERS) {
       let label = t === 65536 ? 'OpenClaw target (64K)' : contextTierShortLabel(t);
-      if (t > maxCtx) label += ' — may exceed VRAM hint';
+      if (t > maxCtx) label += ' — ambitious for this VRAM (often still OK)';
       opts.push({ name: `${t}  – ${label}`, value: t });
     }
     opts.push({ name: 'custom', message: 'Custom (any number you want)' });
     return opts;
   }
 
-  // Always offer the full tier list (through 128K). VRAM only labels stretch options —
-  // previously we hid everything above ~vram*2048, so 8GB cards stopped at 16K/32K.
+  // Always offer the full tier list (through 128K). Soft VRAM guide only annotates ambitious sizes.
   for (const t of CONTEXT_TIERS) {
     let label = contextTierShortLabel(t);
-    if (t > maxCtx) {
-      label += t <= STRETCH_CTX_FLOOR ? ' — stretch (above VRAM hint)' : ' — may exceed VRAM hint';
-    }
+    if (t > maxCtx) label += ' — ambitious for this VRAM (often still OK)';
     opts.push({ name: `${t}  – ${label}`, value: t });
   }
   // Enquirer Select returns choice.name, not choice.value — use name: 'custom' so the follow-up prompt runs.
@@ -1113,12 +1114,12 @@ async function main() {
     if (vramGB == null) {
       console.log(
         '⚠️  OpenClaw recommends 65536 context, but VRAM could not be detected.\n' +
-          '   64K may not fit — start high and let auto-tune / GPU-fit step down, or pick a smaller model / Q4_K_M.\n',
+          '   Start at 64K and let GPU-fit / auto-tune step down if needed.\n',
       );
     } else if (maxCtx < 65536) {
       console.log(
-        '⚠️  OpenClaw recommends 65536 context. Your VRAM hint suggests a lower ceiling — 64K may not fit.\n' +
-          '   Try a smaller model or Q4_K_M quantization if auto-tune cannot reach 100% GPU at 64K.\n',
+        `⚠️  OpenClaw targets 65536 context; soft guide for ~${vramGB}GB VRAM is ${maxCtx}.\n` +
+          '   Smaller/quantized models often still fit 64K at 100% GPU — trust the GPU-fit check.\n',
       );
     }
   }
