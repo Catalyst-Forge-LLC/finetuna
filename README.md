@@ -17,7 +17,7 @@ Ollama’s defaults are safe but often leave performance (and context) on the ta
 | Proof it stays on the GPU | Yes — checks `ollama ps` for `100% GPU` |
 | Best context *and* batch for speed | Optional auto-tune (pivot from your pick, not always 4K→up) |
 | OpenClaw / agent-friendly presets | `--openclaw` / `--openclaw-agent` |
-| Free VRAM when ComfyUI needs the card | `--unload` / `--reload` |
+| Free VRAM for another app that needs the card | `--unload` / `--reload` |
 
 Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on the Ollama service). Finetuna is the **interactive Modelfile tuner**.
 
@@ -38,7 +38,7 @@ Goal: an **optimum that still fits in VRAM** — not “always shrink context.�
 - Node.js **18+**
 - [pnpm](https://pnpm.io/installation)
 - [Ollama](https://ollama.com) installed and running, with at least one model pulled
-- Optional: `nvidia-smi` (or AMD `rocm-smi` / Windows WMI) for total **and free** VRAM hints (catches Hermes / ComfyUI / browsers holding the GPU)
+- Optional: `nvidia-smi` (or AMD `rocm-smi` / Windows WMI) for total **and free** VRAM hints (flags when other apps are already using the GPU)
 
 ## Install
 

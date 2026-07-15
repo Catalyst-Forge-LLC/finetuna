@@ -457,7 +457,7 @@ function queryGpuMemUsedMiB() {
 
 /**
  * Total / used / free VRAM + compute-app names (NVIDIA).
- * Free matters when Hermes, ComfyUI, browsers, etc. already hold the card.
+ * Free matters when other apps (chat UIs, browsers, etc.) already hold the card.
  * @returns {{ vendor: string, totalMiB: number, usedMiB: number|null, freeMiB: number|null, totalGB: number, usedGB: number|null, freeGB: number|null, processes: {pid:string,name:string,usedMiB:number|null}[] } | null}
  */
 function detectGpuMemory() {
@@ -609,7 +609,7 @@ async function warnIfLowFreeVram(gpu) {
   console.log(
     `\n⚠️  Only ~${gpu.freeGB}GB free of ${gpu.totalGB}GB — other GPU users (${procs}) can make loads OOM.`,
   );
-  console.log('   Close Hermes / ComfyUI / other GPU apps, or continue knowing fit estimates use free VRAM.\n');
+  console.log('   Close other GPU apps (or Hermes), or continue knowing fit estimates use free VRAM.\n');
   const { cont } = await prompt([
     {
       type: 'confirm',
