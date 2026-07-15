@@ -1,7 +1,7 @@
 {
   "name": "finetuna",
   "version": "1.0.0",
-  "description": "Interactive Ollama model parameter tuner with auto-benchmarking",
+  "description": "Interactive Modelfile tuner for Ollama — create GPU-fit variants with optional auto-tune",
   "engines": {
     "node": ">=18"
   },
