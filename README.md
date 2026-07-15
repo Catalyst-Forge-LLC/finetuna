@@ -108,7 +108,7 @@ pnpm start
 
 ## Tips
 
-- **VRAM detection** is best-effort. If it fails, pick context manually (or use OpenClaw’s 64K starting point and let GPU-fit / auto-tune step down).
+- **VRAM detection** is best-effort. If it fails, pick context manually (or use OpenClaw’s 64K starting point and let GPU-fit / auto-tune step down). Context presets go through **128K**; sizes above the VRAM hint are labeled stretch.
 - **Flash attention:** set `OLLAMA_FLASH_ATTENTION=1` on the Ollama **server** host and restart Ollama. On Linux (systemd): put `Environment="OLLAMA_FLASH_ATTENTION=1"` in `/etc/systemd/system/ollama.service.d/flash.conf`, then `daemon-reload` + `restart ollama`. Finetuna cannot toggle this per model.
 - **Auto-tune** recreates the model many times — leave time, and lower `BENCH_REPEATS` for a quicker pass.
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`
