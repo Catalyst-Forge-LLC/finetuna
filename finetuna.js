@@ -291,6 +291,32 @@ function isOomError(msg) {
   );
 }
 
+function extractCudaAllocBytes(msg) {
+  const m = String(msg || '').match(/allocate CUDA\d+ buffer of size (\d+)/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function printOomGuidance({ sourceModel, vramGB, numCtx, errMsg, sameAllocAsBefore }) {
+  const allocBytes = extractCudaAllocBytes(errMsg);
+  console.log('\n💥 GPU out-of-memory while loading (ollama create does not verify load).');
+  if (allocBytes) {
+    console.log(`   Failed CUDA alloc ≈ ${(allocBytes / (1024 * 1024)).toFixed(0)} MiB.`);
+  }
+  if (sameAllocAsBefore) {
+    console.log('   Same alloc size after lowering num_ctx → model weights may already fill VRAM; context cuts alone may not help.');
+  }
+  if (/projector/i.test(String(errMsg || ''))) {
+    console.log('   Error mentions projector — multimodal Gemma4 builds need extra VRAM beyond text weights.');
+  }
+  console.log('   Typical causes:');
+  console.log('   • Larger base (12B vs 9B) leaves little KV room on ~8GB cards');
+  console.log('   • Crash leftovers — restart Ollama and check nvidia-smi for free memory');
+  console.log('   • Heavier quant than you think (Q8/FP16 vs Q4)');
+  if (vramGB) console.log(`   • Detected VRAM ≈ ${vramGB}GB; source=${sourceModel}; num_ctx=${numCtx}`);
+  console.log('   Try: sudo systemctl restart ollama  (or quit/relaunch the app), then');
+  console.log('        OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0, or use the 9B / a smaller quant.');
+}
+
 /** Evict loaded models so a recreate/load has a clean shot at VRAM. */
 async function freeGpuVram() {
   console.log('\n🧹 Freeing VRAM (evicting loaded models)…');
@@ -804,7 +830,7 @@ Finally, provide detailed tasting notes as if reviewing a fine wine, but it is a
 
 Remember: every sentence should be more absurd than the last. The goal is maximum theatrical energy. You are performing for the ages. This sandwich is your magnum opus. Do not hold back.`;
 
-async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
+async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {}) {
   // think:false must be top-level (not inside options) or thinking models (e.g. qwen3.5)
   // burn num_predict on CoT and return empty/useless generation metrics.
   const body = {
@@ -815,6 +841,7 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     options: { num_predict: 80 },
   };
   const runUrl = `${OLLAMA_BASE}/api/generate`;
+  const skipCliFallback = Boolean(opts.skipCliFallback);
 
   function ollamaRunFallback(start, cliTimeoutMs) {
     const run = spawnSync('ollama', ['run', newName, 'Tell me a short, fun fact about AI. Answer in 20 words or less.'], {
@@ -926,6 +953,16 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     if (!attempt.ok) {
       if (attempt.oom || isOomError(attempt.errMsg)) {
         return { success: false, errMsg: attempt.errMsg, oom: true };
+      }
+      // Timeouts during load often mean the server is wedged on OOM — CLI fallback just repeats it.
+      if (skipCliFallback || /timed out|AbortError/i.test(attempt.errMsg || '')) {
+        return {
+          success: false,
+          errMsg: attempt.errMsg,
+          oom: false,
+          timedOut: /timed out|AbortError/i.test(attempt.errMsg || ''),
+          loadFailed: true,
+        };
       }
       console.log(`   ⚠️  /api/generate failed (${attempt.errMsg}); falling back to ollama run (no rate metrics)…`);
       return ollamaRunFallback(attempt.start, cliTimeout);
@@ -1049,8 +1086,8 @@ async function sampleBenchmarkRates(newName) {
 }
 
 /** Generation + long-prompt ingestion rates for before/after comparison. */
-async function collectComparisonMetrics(newName) {
-  const gen = await getSpeedMetrics(newName);
+async function collectComparisonMetrics(newName, opts = {}) {
+  const gen = await getSpeedMetrics(newName, FLAGS.genTimeoutMs, opts);
   if (!gen.success) return gen;
   const prompt = await getPromptEvalMetrics(newName);
   return {
@@ -1284,17 +1321,25 @@ async function main() {
     console.log('⚠️  Could not measure baseline speed.');
     if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
 
-    if (beforeMetrics.oom || isOomError(beforeMetrics.errMsg)) {
-      console.log('\n💥 Load failed with GPU out-of-memory (usually num_ctx / KV cache too large for this model + VRAM).');
-      console.log('   ollama create does not prove the model can load — drop context and retry.');
+    if (beforeMetrics.oom || isOomError(beforeMetrics.errMsg) || beforeMetrics.timedOut || beforeMetrics.loadFailed) {
+      printOomGuidance({
+        sourceModel,
+        vramGB,
+        numCtx: currentCtx,
+        errMsg: beforeMetrics.errMsg,
+        sameAllocAsBefore: false,
+      });
       await freeGpuVram();
+      let lastAlloc = extractCudaAllocBytes(beforeMetrics.errMsg);
 
       while (true) {
         const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter(
           (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
         );
         if (lowerOptions.length === 0) {
-          console.log('   No lower context presets left — try Custom or a smaller/quantized base model.');
+          console.log('\n   No lower context presets left.');
+          console.log('   If OOMs persist at small ctx, the 12B weights likely do not fit this GPU — use 9B or more VRAM.');
+          console.log('   Also restart Ollama completely so crashed llama-server processes release CUDA memory.');
           break;
         }
         lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
@@ -1346,7 +1391,7 @@ async function main() {
         await freeGpuVram();
 
         console.log('\n📏 Retrying baseline speed...');
-        beforeMetrics = await collectComparisonMetrics(newName);
+        beforeMetrics = await collectComparisonMetrics(newName, { skipCliFallback: true });
         if (beforeMetrics.success) {
           console.log('\n✅ Response:');
           if (beforeMetrics.output) console.log(beforeMetrics.output.trim());
@@ -1355,7 +1400,20 @@ async function main() {
         }
         console.log('⚠️  Still failing to load.');
         if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
-        if (!(beforeMetrics.oom || isOomError(beforeMetrics.errMsg))) break;
+        const alloc = extractCudaAllocBytes(beforeMetrics.errMsg);
+        const sameAlloc = alloc != null && lastAlloc != null && alloc === lastAlloc;
+        if (beforeMetrics.oom || isOomError(beforeMetrics.errMsg) || beforeMetrics.timedOut) {
+          printOomGuidance({
+            sourceModel,
+            vramGB,
+            numCtx: currentCtx,
+            errMsg: beforeMetrics.errMsg,
+            sameAllocAsBefore: sameAlloc,
+          });
+          if (alloc != null) lastAlloc = alloc;
+          continue;
+        }
+        break;
       }
     }
   }
