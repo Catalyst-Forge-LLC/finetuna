@@ -260,12 +260,12 @@ function metricEvalRate(m) {
   return null;
 }
 
-/** True when after generation rate is meaningfully slower than before (~>1%). */
+/** True when after generation rate is meaningfully slower than before (~>5%). */
 function isAutoTuneNetNegative(before, after) {
   const b = metricEvalRate(before);
   const a = metricEvalRate(after);
   if (b == null || a == null || b <= 0) return false;
-  return a < b * 0.99;
+  return a < b * 0.95;
 }
 
 function detectFlashAttnSupport() {
@@ -276,9 +276,9 @@ function detectFlashAttnSupport() {
       .filter(Boolean);
     return names.some(
       (n) =>
-        /\bRTX\s+(20|30|40|50)\d/i.test(n) ||
-        /\b(Quadro\s+)?RTX\s+(4000|5000|6000|8000)/i.test(n) ||
-        /\b(Tesla\s+)?(T4|A100|A10|L4|H100|V100|L40)\b/i.test(n),
+        /\bRTX\b/i.test(n) ||
+        /\b(GTX\s+16\d{2}|Tesla|Quadro|A\d{2,4}|L\d{1,2}|H\d{2,3}|B\d{3}|V100|T4|P40|P100)\b/i.test(n) ||
+        /\b(GeForce|NVIDIA)\b/i.test(n),
     );
   } catch {
     return false;
@@ -550,16 +550,16 @@ function maxSuggestedCtxFromVram(vramGB) {
 }
 
 function contextTierShortLabel(n) {
-  if (n <= 4096) return 'Fastest / low memory';
-  if (n <= 8192) return 'Balanced (typical default)';
-  if (n <= 12288) return 'High';
+  if (n <= 4096) return 'Small / low memory';
+  if (n <= 8192) return 'Common default range';
+  if (n <= 12288) return 'Medium';
   if (n <= 16384) return 'Large';
   if (n <= 24576) return 'Very large';
-  if (n <= 32768) return 'Heavy context';
-  if (n <= 49152) return 'Very heavy';
-  if (n <= 65536) return 'Monster context';
-  if (n <= 98304) return 'Extreme';
-  return 'Maximum tier';
+  if (n <= 32768) return '32K-class';
+  if (n <= 49152) return '48K-class';
+  if (n <= 65536) return '64K-class';
+  if (n <= 98304) return '96K-class';
+  return '128K-class';
 }
 
 /**
@@ -711,9 +711,12 @@ async function checkGPUFit(newName) {
 
   if (isFullGPU) {
     console.log("✅ Perfect! Model is fully on GPU (100% GPU) — it's hooked! 🐟");
+  } else if (processorInfo === 'unknown') {
+    console.log('⚠️  Could not confirm GPU offload from ollama ps (processor column unknown) — not treating as a hard fail.');
   } else {
     console.log(`⚠️  Not fully on GPU → ${processorInfo}`);
   }
+  // unknown ≠ proven CPU spill; callers should treat false as "not confirmed 100%"
   return isFullGPU;
 }
 
@@ -1042,14 +1045,14 @@ async function main() {
   if (FLAGS.openClaw) {
     const agentNote = FLAGS.openClawAgent ? ' (agent sampling: temperature 0.1, top_k 20)' : '';
     console.log(
-      `OpenClaw mode: 64K context default, num_keep 64, gemma4 TEMPLATE/RENDERER/PARSER${agentNote}.\n`,
+      `OpenClaw mode: 64K context default, num_keep 64, gemma4 TEMPLATE/RENDERER/PARSER${agentNote}.`,
     );
+    console.log('Note: the gemma4 template block is meant for Gemma-class models — other families may need different templates.\n');
   }
   if (flashSupported) {
-    console.log('GPU looks flash-attention capable (RTX 20xx+ class).');
-    console.log('Note: enable via OLLAMA_FLASH_ATTENTION=1 on the Ollama *server* (not Modelfile).\n');
+    console.log('NVIDIA GPU detected — flash attention is a server setting (OLLAMA_FLASH_ATTENTION), not Modelfile.\n');
   } else if (FLAGS.flashAttn === true) {
-    console.log('⚠️  --flash-attn set but no supported NVIDIA GPU detected — setup tips still apply.\n');
+    console.log('⚠️  --flash-attn set but no NVIDIA GPU name detected locally — setup tips still apply (remote Ollama may differ).\n');
   }
 
   const vramGB = detectVRAM();
@@ -1113,13 +1116,11 @@ async function main() {
     const maxCtx = maxSuggestedCtxFromVram(vramGB);
     if (vramGB == null) {
       console.log(
-        '⚠️  OpenClaw recommends 65536 context, but VRAM could not be detected.\n' +
-          '   Start at 64K and let GPU-fit / auto-tune step down if needed.\n',
+        'OpenClaw targets 65536 context; VRAM could not be detected — start at 64K and trust GPU-fit / auto-tune.\n',
       );
     } else if (maxCtx < 65536) {
       console.log(
-        `⚠️  OpenClaw targets 65536 context; soft guide for ~${vramGB}GB VRAM is ${maxCtx}.\n` +
-          '   Smaller/quantized models often still fit 64K at 100% GPU — trust the GPU-fit check.\n',
+        `OpenClaw targets 65536; soft guide for ~${vramGB}GB is ${maxCtx}. Smaller/quantized models often still fit — GPU-fit is authoritative.\n`,
       );
     }
   }
@@ -1162,7 +1163,14 @@ async function main() {
     numCtx = 8192;
   }
 
-  const { numBatch } = await prompt([{ type: 'input', name: 'numBatch', message: 'Batch size (num_batch) – higher = faster generation:', initial: '512' }]);
+  const { numBatch } = await prompt([
+    {
+      type: 'input',
+      name: 'numBatch',
+      message: 'Batch size (num_batch) – higher often helps prompt eval / TTFT (not generation TPS):',
+      initial: '512',
+    },
+  ]);
   const { numGpu } = await prompt([{ type: 'input', name: 'numGpu', message: 'GPU layers (num_gpu) – 999 = max possible:', initial: '999' }]);
 
   if (FLAGS.flashAttn === true) {
@@ -1172,21 +1180,25 @@ async function main() {
     sessionFlashAttn = false;
   } else if (isFlashAttnEnvEnabled()) {
     sessionFlashAttn = true;
-    console.log('OLLAMA_FLASH_ATTENTION is set in this process environment — tagging model as flash-capable.\n');
+    console.log(
+      'OLLAMA_FLASH_ATTENTION is set in *this* process environment (may not match a remote/systemd Ollama server).\n',
+    );
   } else if (flashSupported) {
     const r = await prompt([
       {
         type: 'confirm',
         name: 'useFlash',
-        message: 'Use flash attention on the Ollama server? (prints setup tips; tags -flash name — not a Modelfile param)',
-        initial: true,
+        message: 'Tag model as flash-capable and show OLLAMA_FLASH_ATTENTION setup tips? (server must actually have it enabled)',
+        initial: false,
       },
     ]);
     sessionFlashAttn = r.useFlash;
     if (sessionFlashAttn) printFlashAttnGuidance();
   }
 
-  const vramComment = vramGB ? `Optimized for ${vramGB}GB VRAM (auto-detected)` : 'Optimized for your GPU';
+  const vramComment = vramGB
+    ? `Tuned with ~${vramGB}GB VRAM detected (validate with GPU-fit)`
+    : 'Tuned for your GPU (VRAM not auto-detected)';
   const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn: sessionFlashAttn });
 
   const modelfilePath = path.join(process.cwd(), 'Modelfile-finetuna');
@@ -1276,7 +1288,7 @@ async function main() {
 
         const gpuOk = await checkGPUFit(newName);
         if (!gpuOk) {
-          console.log(`   ⚠️  num_batch=${cand} doesn't fit 100% GPU — skipping`);
+          console.log(`   ⚠️  num_batch=${cand} not confirmed 100% GPU — skipping`);
           batchResults.push({ cand, avg: 0, gpu: false });
           continue;
         }
@@ -1361,7 +1373,7 @@ async function main() {
         }
         const gpuOk = await checkGPUFit(newName);
         if (!gpuOk) {
-          console.log(`   ⚠️  num_ctx=${cand} doesn't fit 100% GPU`);
+          console.log(`   ⚠️  num_ctx=${cand} not confirmed 100% GPU`);
           ctxResults.push({ cand, avg: 0, gpu: false });
           return { ok: false, gpuMiss: true };
         }
@@ -1502,7 +1514,7 @@ async function main() {
     });
     fs.writeFileSync(modelfilePath, finalContent);
     spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
-    console.log('\n   ✅ Final model created with optimal settings!');
+    console.log('\n   ✅ Final model created with best settings among candidates tested.');
 
     console.log('\n📏 Speed after auto-tune...');
     afterMetrics = await collectComparisonMetrics(newName);
@@ -1517,16 +1529,21 @@ async function main() {
     if (isAutoTuneNetNegative(beforeMetrics, afterMetrics)) {
       const b = metricEvalRate(beforeMetrics);
       const a = metricEvalRate(afterMetrics);
+      const grewCtx = bestCtx > baselineCtx;
       console.log(
-        `\n⚠️  Auto-tune is slower on eval_rate (${formatRate(b)} → ${formatRate(a)}).`,
+        `\n⚠️  Auto-tune is slower on eval_rate (${formatRate(b)} → ${formatRate(a)}; >5% drop).`,
       );
-      console.log('   Larger context can be worth a small drop — or revert to your pre-tune settings.');
+      console.log(
+        grewCtx
+          ? '   Context grew — a modest speed drop can still be a good trade.'
+          : '   You can keep these settings or revert to your pre-tune baseline.',
+      );
       const { keepTuned } = await prompt([
         {
           type: 'confirm',
           name: 'keepTuned',
           message: `Keep tuned settings (batch ${bestBatch}, ctx ${bestCtx})? (No = revert to batch ${baselineBatch}, ctx ${baselineCtx})`,
-          initial: false,
+          initial: grewCtx,
         },
       ]);
       if (!keepTuned) {
