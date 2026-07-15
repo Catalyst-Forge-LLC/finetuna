@@ -286,35 +286,67 @@ function isAutoTuneNetNegative(before, after) {
 }
 
 function isOomError(msg) {
-  return /out of memory|out-of-memory|cudaMalloc|failed to allocate|alloc_tensor|kv cache|insufficient memory|\bOOM\b/i.test(
+  return /out of memory|out-of-memory|cudaMalloc|failed to allocate|alloc_tensor|kv cache|insufficient memory|compute (?:pp )?buffers|ggml_gallocr|graph_reserve|\bOOM\b/i.test(
     String(msg || ''),
   );
 }
 
 function extractCudaAllocBytes(msg) {
-  const m = String(msg || '').match(/allocate CUDA\d+ buffer of size (\d+)/i);
+  const m = String(msg || '').match(/(?:allocate CUDA\d+ buffer of size|buffer of size) (\d+)/i);
   return m ? parseInt(m[1], 10) : null;
 }
 
+/** @returns {'wont_fit'|'kv'|'compute'|'oom'} */
+function classifyLoadOom(errMsg, { numCtx, sameAllocAsBefore } = {}) {
+  const msg = String(errMsg || '');
+  const projector = /projector/i.test(msg);
+  const kv = /kv cache/i.test(msg);
+  const compute = /compute (?:pp )?buffers|ggml_gallocr|graph_reserve/i.test(msg);
+  const lowCtx = numCtx != null && numCtx <= 8192;
+  // Failed at small ctx, or alloc didn't shrink when ctx dropped → weights/overhead, not KV.
+  if (sameAllocAsBefore || (lowCtx && (compute || projector || isOomError(msg)))) return 'wont_fit';
+  if (kv) return 'kv';
+  if (compute) return 'compute';
+  return 'oom';
+}
+
+function printOomBrief(errMsg) {
+  const alloc = extractCudaAllocBytes(errMsg);
+  const bits = [];
+  if (/projector/i.test(String(errMsg || ''))) bits.push('multimodal projector');
+  if (/kv cache/i.test(String(errMsg || ''))) bits.push('KV cache');
+  if (/compute (?:pp )?buffers|ggml_gallocr|graph_reserve/i.test(String(errMsg || ''))) bits.push('compute buffers');
+  if (alloc) bits.push(`~${(alloc / (1024 * 1024)).toFixed(0)} MiB`);
+  return bits.length ? bits.join(', ') : 'CUDA OOM';
+}
+
+/**
+ * Short diagnosis only — no bullet lists.
+ * @returns {'wont_fit'|'kv'|'compute'|'oom'}
+ */
 function printOomGuidance({ sourceModel, vramGB, numCtx, errMsg, sameAllocAsBefore }) {
-  const allocBytes = extractCudaAllocBytes(errMsg);
-  console.log('\n💥 GPU out-of-memory while loading (ollama create does not verify load).');
-  if (allocBytes) {
-    console.log(`   Failed CUDA alloc ≈ ${(allocBytes / (1024 * 1024)).toFixed(0)} MiB.`);
+  const kind = classifyLoadOom(errMsg, { numCtx, sameAllocAsBefore });
+  const vram = vramGB ? `~${vramGB}GB VRAM` : 'this GPU';
+  const detail = printOomBrief(errMsg);
+
+  if (kind === 'wont_fit') {
+    console.log(`\n💥 ${sourceModel} won't fit ${vram} (OOM at num_ctx=${numCtx}: ${detail}).`);
+    console.log('   Lowering context will not help. Use a smaller model/quant, or restart Ollama and check nvidia-smi.');
+    return kind;
   }
-  if (sameAllocAsBefore) {
-    console.log('   Same alloc size after lowering num_ctx → model weights may already fill VRAM; context cuts alone may not help.');
+  if (kind === 'kv') {
+    console.log(`\n💥 OOM at num_ctx=${numCtx} — KV cache too large for ${vram} (${detail}).`);
+    console.log('   Create ≠ load; drop context and retry.');
+    return kind;
   }
-  if (/projector/i.test(String(errMsg || ''))) {
-    console.log('   Error mentions projector — multimodal Gemma4 builds need extra VRAM beyond text weights.');
+  if (kind === 'compute') {
+    console.log(`\n💥 OOM at num_ctx=${numCtx} — ${detail}; model barely fits ${vram}.`);
+    console.log('   Try a lower context once; if it still fails, switch model/quant.');
+    return kind;
   }
-  console.log('   Typical causes:');
-  console.log('   • Larger base (12B vs 9B) leaves little KV room on ~8GB cards');
-  console.log('   • Crash leftovers — restart Ollama and check nvidia-smi for free memory');
-  console.log('   • Heavier quant than you think (Q8/FP16 vs Q4)');
-  if (vramGB) console.log(`   • Detected VRAM ≈ ${vramGB}GB; source=${sourceModel}; num_ctx=${numCtx}`);
-  console.log('   Try: sudo systemctl restart ollama  (or quit/relaunch the app), then');
-  console.log('        OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0, or use the 9B / a smaller quant.');
+  console.log(`\n💥 GPU OOM loading ${sourceModel} at num_ctx=${numCtx} (${detail}, ${vram}).`);
+  console.log('   Drop context, or use a smaller model if it keeps failing.');
+  return kind;
 }
 
 /** Evict loaded models so a recreate/load has a clean shot at VRAM. */
@@ -1319,10 +1351,10 @@ async function main() {
     printSpeedSummary(beforeMetrics, { title: 'Baseline performance' });
   } else {
     console.log('⚠️  Could not measure baseline speed.');
-    if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
+    // Full Ollama error blobs are noisy; printOomGuidance summarizes when it's OOM.
 
     if (beforeMetrics.oom || isOomError(beforeMetrics.errMsg) || beforeMetrics.timedOut || beforeMetrics.loadFailed) {
-      printOomGuidance({
+      let oomKind = printOomGuidance({
         sourceModel,
         vramGB,
         numCtx: currentCtx,
@@ -1332,14 +1364,18 @@ async function main() {
       await freeGpuVram();
       let lastAlloc = extractCudaAllocBytes(beforeMetrics.errMsg);
 
-      while (true) {
+      while (oomKind !== 'wont_fit') {
         const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter(
           (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
         );
         if (lowerOptions.length === 0) {
-          console.log('\n   No lower context presets left.');
-          console.log('   If OOMs persist at small ctx, the 12B weights likely do not fit this GPU — use 9B or more VRAM.');
-          console.log('   Also restart Ollama completely so crashed llama-server processes release CUDA memory.');
+          printOomGuidance({
+            sourceModel,
+            vramGB,
+            numCtx: currentCtx,
+            errMsg: beforeMetrics.errMsg,
+            sameAllocAsBefore: true,
+          });
           break;
         }
         lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
@@ -1367,7 +1403,7 @@ async function main() {
                       type: 'input',
                       name: 'custom',
                       message: 'Custom context:',
-                      initial: String(Math.max(4096, Math.floor(currentCtx / 2))),
+                      initial: String(Math.max(2048, Math.floor(currentCtx / 2))),
                     },
                   ])
                 ).custom,
@@ -1398,12 +1434,11 @@ async function main() {
           printSpeedSummary(beforeMetrics, { title: 'Baseline performance' });
           break;
         }
-        console.log('⚠️  Still failing to load.');
-        if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
         const alloc = extractCudaAllocBytes(beforeMetrics.errMsg);
         const sameAlloc = alloc != null && lastAlloc != null && alloc === lastAlloc;
         if (beforeMetrics.oom || isOomError(beforeMetrics.errMsg) || beforeMetrics.timedOut) {
-          printOomGuidance({
+          console.log(`⚠️  Still OOM (${printOomBrief(beforeMetrics.errMsg)}).`);
+          oomKind = printOomGuidance({
             sourceModel,
             vramGB,
             numCtx: currentCtx,
@@ -1413,6 +1448,8 @@ async function main() {
           if (alloc != null) lastAlloc = alloc;
           continue;
         }
+        console.log('⚠️  Still failing to load.');
+        if (beforeMetrics.errMsg) console.log(`   ${printOomBrief(beforeMetrics.errMsg)}`);
         break;
       }
     }
@@ -1420,7 +1457,7 @@ async function main() {
   let measuredSinceCreate = Boolean(beforeMetrics?.success);
   let autoTune = FLAGS.autoTune;
   if (!measuredSinceCreate) {
-    console.log('\n⚠️  Skipping auto-tune until the model loads successfully (fix OOM / timeouts first).');
+    console.log('\n⚠️  Skipping auto-tune until the model loads.');
     autoTune = false;
   } else if (!autoTune) {
     const r = await prompt([
