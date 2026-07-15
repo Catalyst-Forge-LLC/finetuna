@@ -268,6 +268,40 @@ function isAutoTuneNetNegative(before, after) {
   return a < b * 0.95;
 }
 
+function isOomError(msg) {
+  return /out of memory|out-of-memory|cudaMalloc|failed to allocate|alloc_tensor|kv cache|insufficient memory|\bOOM\b/i.test(
+    String(msg || ''),
+  );
+}
+
+/** Evict loaded models so a recreate/load has a clean shot at VRAM. */
+async function freeGpuVram() {
+  console.log('\n🧹 Freeing VRAM (evicting loaded models)…');
+  try {
+    const models = await listLoadedModelsHttp();
+    if (models.length === 0) {
+      console.log('   No models reported in /api/ps.');
+      return;
+    }
+    for (const m of models) {
+      process.stdout.write(`   Evicting ${m}… `);
+      try {
+        await evictModelFromVram(m);
+        console.log('done');
+      } catch (err) {
+        console.log(`failed (${err.message})`);
+      }
+    }
+  } catch {
+    try {
+      spawnSync('ollama', ['stop'], { timeout: 5000 });
+    } catch {
+      /* ignore */
+    }
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+}
+
 function detectFlashAttnSupport() {
   try {
     const names = execSync('nvidia-smi --query-gpu=name --format=csv,noheader', { encoding: 'utf8' })
@@ -787,7 +821,8 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
       };
     }
     const bits = [errOut, run.error && run.error.message, run.status !== 0 ? `ollama run exit ${run.status}` : ''].filter(Boolean);
-    return { success: false, errMsg: bits.join(' — ') || 'No output from ollama run (model may still be loading — try FINETUNA_GEN_TIMEOUT)' };
+    const errMsg = bits.join(' — ') || 'No output from ollama run (model may still be loading — try FINETUNA_GEN_TIMEOUT)';
+    return { success: false, errMsg, oom: isOomError(errMsg) };
   }
 
   async function tryHttp(deadlineMs) {
@@ -803,14 +838,15 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     } catch (e) {
       const msg = e.name === 'AbortError' ? `HTTP request timed out (${deadlineMs}ms)` : e.message || String(e);
       if (FLAGS.verbose) console.log(`   [verbose] ${runUrl} → ${msg}`);
-      return { ok: false, errMsg: msg, start };
+      return { ok: false, errMsg: msg, start, oom: false };
     }
     const end = Date.now();
     const text = await res.text();
     if (!res.ok) {
-      const snippet = (text || '').slice(0, 300);
+      const snippet = (text || '').slice(0, 400);
       if (FLAGS.verbose) console.log(`   [verbose] HTTP ${res.status} ${snippet}`);
-      return { ok: false, errMsg: `HTTP ${res.status}${snippet ? `: ${snippet}` : ''}`, start };
+      const errMsg = `HTTP ${res.status}${snippet ? `: ${snippet}` : ''}`;
+      return { ok: false, errMsg, start, oom: isOomError(errMsg) };
     }
     if (!text || !text.trim()) {
       return { ok: false, errMsg: 'Empty body from Ollama /api/generate', start };
@@ -820,7 +856,8 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
       return { ok: false, errMsg: 'Could not parse JSON from /api/generate', start };
     }
     if (data.error) {
-      return { ok: false, errMsg: String(data.error), start };
+      const errMsg = String(data.error);
+      return { ok: false, errMsg, start, oom: isOomError(errMsg) };
     }
     const outputText = (data.response || '').trim();
     const tokensGenerated = data.eval_count || 0;
@@ -861,14 +898,18 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     if (!attempt.ok) {
       const retryMs = Math.min(Math.max(timeoutMs * 2, 120000), 600000);
       const retryable =
-        /timed out|AbortError|ECONNREFUSED|fetch failed|Empty body|Empty response|HTTP \d|think:false/i.test(attempt.errMsg || '') ||
-        attempt.errMsg === 'Could not parse JSON from /api/generate';
+        !attempt.oom &&
+        (/timed out|AbortError|ECONNREFUSED|fetch failed|Empty body|Empty response|HTTP \d|think:false/i.test(attempt.errMsg || '') ||
+          attempt.errMsg === 'Could not parse JSON from /api/generate');
       if (retryable) {
         if (FLAGS.verbose) console.log(`   [verbose] Retrying /api/generate with ${retryMs}ms timeout...`);
         attempt = await tryHttp(retryMs);
       }
     }
     if (!attempt.ok) {
+      if (attempt.oom || isOomError(attempt.errMsg)) {
+        return { success: false, errMsg: attempt.errMsg, oom: true };
+      }
       console.log(`   ⚠️  /api/generate failed (${attempt.errMsg}); falling back to ollama run (no rate metrics)…`);
       return ollamaRunFallback(attempt.start, cliTimeout);
     }
@@ -1208,6 +1249,7 @@ async function main() {
   console.log(`\n🎣 Creating new model: ${newName} ...`);
   spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
   console.log(`\n🎉 Model "${newName}" created successfully! It’s a keeper! 🐟`);
+  console.log('   (Note: ollama create only registers the Modelfile — load/VRAM is checked next.)');
 
   let fullGPU = false;
   let currentCtx = numCtx;
@@ -1224,10 +1266,88 @@ async function main() {
   } else {
     console.log('⚠️  Could not measure baseline speed.');
     if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
+
+    if (beforeMetrics.oom || isOomError(beforeMetrics.errMsg)) {
+      console.log('\n💥 Load failed with GPU out-of-memory (usually num_ctx / KV cache too large for this model + VRAM).');
+      console.log('   ollama create does not prove the model can load — drop context and retry.');
+      await freeGpuVram();
+
+      while (true) {
+        const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter(
+          (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
+        );
+        if (lowerOptions.length === 0) {
+          console.log('   No lower context presets left — try Custom or a smaller/quantized base model.');
+          break;
+        }
+        lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
+
+        const { reduce } = await prompt([
+          {
+            type: 'confirm',
+            name: 'reduce',
+            message: `Drop num_ctx below ${currentCtx} and recreate so it can load?`,
+            initial: true,
+          },
+        ]);
+        if (!reduce) break;
+
+        const { newCtxChoice } = await prompt([
+          { type: 'select', name: 'newCtxChoice', message: 'Pick a lower context size:', choices: lowerOptions },
+        ]);
+        const rawNew = unwrapChoice(newCtxChoice);
+        currentCtx =
+          rawNew === 'custom'
+            ? parseInt(
+                (
+                  await prompt([
+                    {
+                      type: 'input',
+                      name: 'custom',
+                      message: 'Custom context:',
+                      initial: String(Math.max(4096, Math.floor(currentCtx / 2))),
+                    },
+                  ])
+                ).custom,
+                10,
+              )
+            : rawNew;
+        numCtx = currentCtx;
+
+        const fallbackBatch = parseInt(numBatch, 10) || 512;
+        const newContent = buildModelfileContent({
+          sourceModel,
+          vramComment,
+          numCtx: currentCtx,
+          numGpu,
+          numBatch: fallbackBatch,
+          flashAttn: sessionFlashAttn,
+        });
+        fs.writeFileSync(modelfilePath, newContent);
+        console.log(`\n🔄 Recreating ${newName} with num_ctx = ${currentCtx} ...`);
+        spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
+        await freeGpuVram();
+
+        console.log('\n📏 Retrying baseline speed...');
+        beforeMetrics = await collectComparisonMetrics(newName);
+        if (beforeMetrics.success) {
+          console.log('\n✅ Response:');
+          if (beforeMetrics.output) console.log(beforeMetrics.output.trim());
+          printSpeedSummary(beforeMetrics, { title: 'Baseline performance' });
+          break;
+        }
+        console.log('⚠️  Still failing to load.');
+        if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
+        if (!(beforeMetrics.oom || isOomError(beforeMetrics.errMsg))) break;
+      }
+    }
   }
   let measuredSinceCreate = Boolean(beforeMetrics?.success);
   let autoTune = FLAGS.autoTune;
-  if (!autoTune) {
+  if (!measuredSinceCreate) {
+    console.log('\n⚠️  Skipping auto-tune until the model loads successfully (fix OOM / timeouts first).');
+    autoTune = false;
+  } else if (!autoTune) {
     const r = await prompt([
       {
         type: 'confirm',
