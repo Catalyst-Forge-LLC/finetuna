@@ -415,6 +415,10 @@ async function reloadLastModel() {
 
 function printSpeedSummary(metrics, { title = 'Performance' } = {}) {
   console.log(`\n📊 ${title}:`);
+  if (metrics.fromCliFallback || metrics.noRateMetrics) {
+    console.log('   ⚠️  No reliable token rates (CLI fallback and/or thinking-model noise).');
+    console.log('   Generation TPS needs a successful /api/generate with think:false.');
+  }
   if (metrics.evalRate != null) console.log(`   eval_rate (gen)     : ${formatRate(metrics.evalRate)}`);
   if (metrics.promptEvalRate != null) console.log(`   prompt_eval_rate    : ${formatRate(metrics.promptEvalRate)}`);
   console.log(`   Tokens generated    : ${metrics.tokensGenerated}`);
@@ -735,7 +739,15 @@ Finally, provide detailed tasting notes as if reviewing a fine wine, but it is a
 Remember: every sentence should be more absurd than the last. The goal is maximum theatrical energy. You are performing for the ages. This sandwich is your magnum opus. Do not hold back.`;
 
 async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
-  const body = { model: newName, prompt: 'Tell me a short, fun fact about AI.', stream: false, options: { num_predict: 50 } };
+  // think:false must be top-level (not inside options) or thinking models (e.g. qwen3.5)
+  // burn num_predict on CoT and return empty/useless generation metrics.
+  const body = {
+    model: newName,
+    prompt: 'Tell me a short, fun fact about AI. Reply in one or two sentences.',
+    stream: false,
+    think: false,
+    options: { num_predict: 80 },
+  };
   const runUrl = `${OLLAMA_BASE}/api/generate`;
 
   function ollamaRunFallback(start, cliTimeoutMs) {
@@ -748,7 +760,16 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     const out = (run.stdout || '').trim();
     const errOut = (run.stderr || '').trim();
     if (out) {
-      return { success: true, output: out, tokensGenerated: 0, tpsEval: 'N/A', tpsWall: 'N/A', totalTimeSec: (Date.now() - start) / 1000 };
+      return {
+        success: true,
+        output: out,
+        tokensGenerated: 0,
+        tpsEval: 'N/A',
+        tpsWall: 'N/A',
+        totalTimeSec: (Date.now() - start) / 1000,
+        fromCliFallback: true,
+        noRateMetrics: true,
+      };
     }
     const bits = [errOut, run.error && run.error.message, run.status !== 0 ? `ollama run exit ${run.status}` : ''].filter(Boolean);
     return { success: false, errMsg: bits.join(' — ') || 'No output from ollama run (model may still be loading — try FINETUNA_GEN_TIMEOUT)' };
@@ -786,8 +807,16 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     if (data.error) {
       return { ok: false, errMsg: String(data.error), start };
     }
-    const outputText = data.response || '';
+    const outputText = (data.response || '').trim();
     const tokensGenerated = data.eval_count || 0;
+    // Thinking models with think ignored: often empty response + lots of thinking tokens / long duration
+    if (!outputText && (data.thinking || tokensGenerated === 0)) {
+      return {
+        ok: false,
+        errMsg: 'Empty response (thinking model may have ignored think:false or burned the token budget)',
+        start,
+      };
+    }
     const evalDurationMs = (data.eval_duration || 0) / 1_000_000;
     const totalTimeSec = (end - start) / 1000;
     const { evalRate, promptEvalRate } = ratesFromGenerateData(data);
@@ -805,6 +834,7 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
         totalTimeSec,
         evalRate,
         promptEvalRate,
+        noRateMetrics: tokensGenerated === 0 || tpsEval === 'N/A',
       },
       start,
     };
@@ -816,14 +846,15 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
     if (!attempt.ok) {
       const retryMs = Math.min(Math.max(timeoutMs * 2, 120000), 600000);
       const retryable =
-        /timed out|AbortError|ECONNREFUSED|fetch failed|Empty body|HTTP \d/i.test(attempt.errMsg || '') || attempt.errMsg === 'Could not parse JSON from /api/generate';
+        /timed out|AbortError|ECONNREFUSED|fetch failed|Empty body|Empty response|HTTP \d|think:false/i.test(attempt.errMsg || '') ||
+        attempt.errMsg === 'Could not parse JSON from /api/generate';
       if (retryable) {
         if (FLAGS.verbose) console.log(`   [verbose] Retrying /api/generate with ${retryMs}ms timeout...`);
         attempt = await tryHttp(retryMs);
       }
     }
     if (!attempt.ok) {
-      if (FLAGS.verbose) console.log(`   [verbose] API failed (${attempt.errMsg}); trying ollama run (timeout ${cliTimeout}ms)...`);
+      console.log(`   ⚠️  /api/generate failed (${attempt.errMsg}); falling back to ollama run (no rate metrics)…`);
       return ollamaRunFallback(attempt.start, cliTimeout);
     }
     return attempt.result;
@@ -834,7 +865,13 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs) {
 
 // Measures prompt-eval speed (TTFT) using a long prompt — this is what num_batch actually affects
 async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
-  const body = { model: newName, prompt: LONG_PROMPT, stream: false, options: { num_predict: 1 } };
+  const body = {
+    model: newName,
+    prompt: LONG_PROMPT,
+    stream: false,
+    think: false,
+    options: { num_predict: 1 },
+  };
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
       method: 'POST',
