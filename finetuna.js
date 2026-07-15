@@ -238,11 +238,34 @@ function ctxKLabel(numCtx) {
   return String(numCtx);
 }
 
-function suggestModelName(baseName, numCtx, flashAttn) {
-  const base = baseName.replace(/-ctx[\d.]+k(-flash)?$/i, '').replace(/-finetuna$/i, '');
+function suggestModelName(userModelName, numCtx, flashAttn) {
+  // Prefer the name the user chose earlier; only strip prior ctx/flash suffixes so we don't stack them.
+  let base = String(userModelName || '')
+    .replace(/:.*$/, '')
+    .replace(/-ctx[\d.]+k$/i, '')
+    .replace(/-flash$/i, '');
+  if (!base) base = 'model';
   let name = `${base}-ctx${ctxKLabel(numCtx)}`;
   if (flashAttn) name += '-flash';
   return name;
+}
+
+function metricEvalRate(m) {
+  if (!m) return null;
+  if (m.evalRate != null && Number.isFinite(m.evalRate)) return m.evalRate;
+  if (m.tpsEval != null && m.tpsEval !== 'N/A') {
+    const n = parseFloat(m.tpsEval);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** True when after generation rate is meaningfully slower than before (~>1%). */
+function isAutoTuneNetNegative(before, after) {
+  const b = metricEvalRate(before);
+  const a = metricEvalRate(after);
+  if (b == null || a == null || b <= 0) return false;
+  return a < b * 0.99;
 }
 
 function detectFlashAttnSupport() {
@@ -974,14 +997,14 @@ async function collectComparisonMetrics(newName) {
   };
 }
 
-async function maybeRenameWithSuggested(currentName, sourceModel, numCtx, flashAttn) {
-  const suggested = suggestModelName(sourceModel.split(':')[0], numCtx, flashAttn);
+async function maybeRenameWithSuggested(currentName, numCtx, flashAttn) {
+  const suggested = suggestModelName(currentName, numCtx, flashAttn);
   if (suggested === currentName) return currentName;
   const r = await prompt([
     {
       type: 'confirm',
       name: 'useSuggested',
-      message: `Save as "${suggested}"? (self-documenting name for ollama list)`,
+      message: `Also save as "${suggested}"? (keeps "${currentName}"; self-documenting name for ollama list)`,
       initial: true,
     },
   ]);
@@ -991,7 +1014,7 @@ async function maybeRenameWithSuggested(currentName, sourceModel, numCtx, flashA
     console.log(`   ⚠️  Could not copy to ${suggested} — keeping ${currentName}`);
     return currentName;
   }
-  console.log(`   ✅ Model also available as "${suggested}"`);
+  console.log(`   ✅ Model also available as "${suggested}" (original: ${currentName})`);
   return suggested;
 }
 
@@ -1210,6 +1233,8 @@ async function main() {
     const currentBatch = parseInt(numBatch, 10) || 512;
     bestBatch = currentBatch;
     let bestCtx = currentCtx;
+    const baselineBatch = currentBatch;
+    const baselineCtx = currentCtx;
     const batchResults = [];
     const ctxResults = [];
 
@@ -1488,6 +1513,42 @@ async function main() {
     printAutoTuneComparison(beforeMetrics, afterMetrics);
     measuredSinceCreate = Boolean(afterMetrics?.success);
 
+    if (isAutoTuneNetNegative(beforeMetrics, afterMetrics)) {
+      const b = metricEvalRate(beforeMetrics);
+      const a = metricEvalRate(afterMetrics);
+      console.log(
+        `\n⚠️  Auto-tune is slower on eval_rate (${formatRate(b)} → ${formatRate(a)}).`,
+      );
+      console.log('   Larger context can be worth a small drop — or revert to your pre-tune settings.');
+      const { keepTuned } = await prompt([
+        {
+          type: 'confirm',
+          name: 'keepTuned',
+          message: `Keep tuned settings (batch ${bestBatch}, ctx ${bestCtx})? (No = revert to batch ${baselineBatch}, ctx ${baselineCtx})`,
+          initial: false,
+        },
+      ]);
+      if (!keepTuned) {
+        bestBatch = baselineBatch;
+        bestCtx = baselineCtx;
+        currentCtx = baselineCtx;
+        const revertContent = buildModelfileContent({
+          sourceModel,
+          vramComment,
+          numCtx: baselineCtx,
+          numGpu,
+          numBatch: baselineBatch,
+          flashAttn: sessionFlashAttn,
+          finetunaNote: 'baseline restored after slower auto-tune',
+        });
+        fs.writeFileSync(modelfilePath, revertContent);
+        spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
+        console.log(`\n   ✅ Reverted to baseline (num_batch=${baselineBatch}, num_ctx=${baselineCtx}).`);
+        afterMetrics = await collectComparisonMetrics(newName);
+        if (afterMetrics.success) printSpeedSummary(afterMetrics, { title: 'After revert' });
+      }
+    }
+
     if (FLAGS.benchmarkReport || benchmarkRows.length > 0) {
       const sample = await sampleBenchmarkRates(newName);
       benchmarkRows.push({
@@ -1569,7 +1630,7 @@ async function main() {
     }
   }
 
-  let finalName = await maybeRenameWithSuggested(newName, sourceModel, currentCtx, sessionFlashAttn);
+  let finalName = await maybeRenameWithSuggested(newName, currentCtx, sessionFlashAttn);
 
   if (pendingResultsLog) {
     pendingResultsLog.model = finalName;
