@@ -59,19 +59,19 @@ node finetuna.js --help
 
 | Flag | Purpose |
 |------|---------|
-| `--auto-tune` | Run batch/context (and optional flash A/B) benchmarks without the confirm prompt |
+| `--auto-tune` | Run batch/context benchmarks without the confirm prompt |
 | `--skip-batch` / `--skip-ctx` | Skip Phase 1 or Phase 2 of auto-tune |
 | `--openclaw` | OpenClaw preset: 64K context default, `num_keep 64`, Gemma4 template block |
 | `--openclaw-agent` | Same as `--openclaw` plus `temperature 0.1` / `top_k 20` |
 | `--no-openclaw` | Disable OpenClaw block even if `FINETUNA_OPENCLAW` is set |
-| `--flash-attn` / `--no-flash-attn` | Force flash attention on or off |
+| `--flash-attn` / `--no-flash-attn` | Tag `-flash` naming + print `OLLAMA_FLASH_ATTENTION` setup tips (server-side; not a Modelfile param) |
 | `--benchmark-report` | Print a markdown table and write `finetuna-benchmark.md` |
 | `--unload` / `--panic` | Evict loaded models from VRAM (`keep_alive: 0`) |
 | `--reload` | Load the last Finetuna model from `.finetuna-state.json` |
 | `--verbose` | Extra API / `ollama` diagnostics |
 | `--timeout` / `--gen-timeout` / `--bench-repeats` | Timing and repeat controls |
 
-With `--auto-tune` and no flash flag, Finetuna A/B-tests flash attention after batch/ctx sweeps so winners stay consistent. If you answer the flash prompt (non–auto-tune runs) or pass `--flash-attn` / `--no-flash-attn`, that choice is locked.
+**Flash attention** is an Ollama *server* setting (`OLLAMA_FLASH_ATTENTION=1`), not a Modelfile `PARAMETER`. Finetuna will not inject `flash_attn` into the Modelfile (Ollama rejects it). Use `--flash-attn` (or the prompt on RTX GPUs) for setup tips and a `-flash` model name tag. Restart Ollama after setting the env var.
 
 ## Outputs
 
@@ -91,7 +91,7 @@ With `--auto-tune` and no flash flag, Finetuna A/B-tests flash attention after b
 | `FINETUNA_GEN_TIMEOUT` | Generation benchmark timeout (ms). Large cold loads may need `120000+` | `60000` |
 | `BENCH_REPEATS` | Auto-tune repeats per candidate | `3` |
 | `FINETUNA_OPENCLAW` | `1` / `true` / `yes` → same as `--openclaw` | off |
-| `FINETUNA_FLASH_ATTN` | `1`/`true` force on; `0`/`false` force off; unset = auto | auto |
+| `FINETUNA_FLASH_ATTN` | `1`/`true` → flash naming/tips; `0`/`false` → off; unset = prompt on capable GPUs | auto |
 
 ```bash
 # bash / zsh
@@ -109,6 +109,7 @@ pnpm start
 ## Tips
 
 - **VRAM detection** is best-effort. If it fails, pick context manually (or use OpenClaw’s 64K starting point and let GPU-fit / auto-tune step down).
+- **Flash attention:** set `OLLAMA_FLASH_ATTENTION=1` on the Ollama server and restart it — Finetuna cannot toggle this per model.
 - **Auto-tune** recreates the model many times — leave time, and lower `BENCH_REPEATS` for a quicker pass.
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`
 - **`--verbose`** helps when HTTP calls fail or the host URL is wrong.

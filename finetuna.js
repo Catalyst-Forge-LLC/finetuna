@@ -48,8 +48,8 @@ function parseFlags() {
           '  --openclaw            OpenClaw Modelfile preset (64K ctx default, gemma4 template, num_keep 64)',
           '  --openclaw-agent      Same as --openclaw with temperature 0.1 / top_k 20 (deterministic agents)',
           '  --no-openclaw         Turn off OpenClaw block even if FINETUNA_OPENCLAW is set',
-          '  --flash-attn          Force flash_attn 1 + use_mmap 0 (locks; skips A/B)',
-          '  --no-flash-attn       Disable flash attention (locks; skips A/B)',
+          '  --flash-attn          Tag -flash naming + print OLLAMA_FLASH_ATTENTION setup tips',
+          '  --no-flash-attn       Do not treat flash attention as enabled for naming/docs',
           '  --benchmark-report    Print markdown benchmark table (+ finetuna-benchmark.md)',
           '  --unload, --panic     Evict all loaded models from VRAM (keep_alive: 0)',
           '  --reload              Reload last model from .finetuna-state.json',
@@ -58,7 +58,7 @@ function parseFlags() {
           'Environment variables (override defaults, flags take precedence):',
           '  OLLAMA_HOST           Ollama HTTP base URL (default http://127.0.0.1:11434)',
           '  FINETUNA_OPENCLAW     If 1/true/yes, same as --openclaw (use --no-openclaw to force off)',
-          '  FINETUNA_FLASH_ATTN   1/true or 0/false to force flash attention (default: auto on RTX 20xx+)',
+          '  FINETUNA_FLASH_ATTN   1/true or 0/false for flash naming/docs (flash is a server env, not Modelfile)',
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
           '  BENCH_REPEATS         Same as --bench-repeats',
@@ -239,6 +239,36 @@ function detectFlashAttnSupport() {
   } catch {
     return false;
   }
+}
+
+/** Flash attention is an Ollama *server* setting (OLLAMA_FLASH_ATTENTION), not a Modelfile PARAMETER. */
+function isFlashAttnEnvEnabled() {
+  const v = String(process.env.OLLAMA_FLASH_ATTENTION || '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+function printFlashAttnGuidance() {
+  console.log(
+    [
+      '',
+      'Flash attention is enabled on the Ollama *server*, not via Modelfile parameters',
+      '(PARAMETER flash_attn is not valid — ollama create will reject it).',
+      '',
+      'Set this before starting Ollama, then restart the Ollama app/service:',
+      '',
+      '  Windows (then quit & relaunch Ollama from the tray):',
+      '    setx OLLAMA_FLASH_ATTENTION 1',
+      '',
+      '  bash / zsh (same shell that starts `ollama serve`):',
+      '    export OLLAMA_FLASH_ATTENTION=1',
+      '',
+      '  Linux systemd override:',
+      '    Environment=OLLAMA_FLASH_ATTENTION=1',
+      '',
+      '  FAQ: https://docs.ollama.com/faq',
+      '',
+    ].join('\n'),
+  );
 }
 
 function queryGpuMemUsedMiB() {
@@ -520,9 +550,11 @@ function unwrapChoice(choice) {
 /**
  * Build Modelfile text. With OpenClaw mode, embeds explicit Gemma4 TEMPLATE / RENDERER / PARSER,
  * num_keep 64, and sampling PARAMETERs.
+ * Note: flash attention is NOT a Modelfile param — use OLLAMA_FLASH_ATTENTION on the Ollama server.
  */
 function buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, finetunaNote = '', flashAttn = false }) {
-  const commentLine = finetunaNote ? `# ${vramComment} — ${finetunaNote}` : `# ${vramComment}`;
+  const flashNote = flashAttn ? ' — flash attn via OLLAMA_FLASH_ATTENTION=1 on server' : '';
+  const commentLine = finetunaNote ? `# ${vramComment} — ${finetunaNote}${flashNote}` : `# ${vramComment}${flashNote}`;
   const openClawBlock = FLAGS.openClaw
     ? `# OpenClaw compatibility (see --openclaw / FINETUNA_OPENCLAW)
 TEMPLATE {{ .Prompt }}
@@ -533,16 +565,9 @@ PARAMETER num_keep 64
 
 `
     : '';
-  const flashBlock = flashAttn
-    ? `# Flash attention (RTX 20xx+ / --flash-attn)
-PARAMETER use_mmap 0
-PARAMETER flash_attn 1
-
-`
-    : '';
   return `FROM ${sourceModel}
 
-${openClawBlock}${flashBlock}${commentLine}
+${openClawBlock}${commentLine}
 PARAMETER num_ctx ${numCtx}
 PARAMETER num_gpu ${numGpu}
 PARAMETER num_batch ${numBatch}
@@ -877,50 +902,6 @@ async function collectComparisonMetrics(newName) {
   };
 }
 
-async function benchmarkFlashAttn({
-  newName,
-  modelfilePath,
-  sourceModel,
-  vramComment,
-  numCtx,
-  numGpu,
-  numBatch,
-  repeatCount,
-}) {
-  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  Phase 3: flash_attn A/B (eval_rate)');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-  async function runWith(flashAttn) {
-    const content = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn });
-    fs.writeFileSync(modelfilePath, content);
-    const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
-    if (createResult.status !== 0) return 0;
-    const gpuOk = await checkGPUFit(newName);
-    if (!gpuOk) return 0;
-    return benchmarkModel(newName, repeatCount, flashAttn ? '[flash=1] ' : '[flash=0] ');
-  }
-
-  const without = await runWith(false);
-  const withFlash = await runWith(true);
-  console.log(`\n   flash_attn=0 → ${without.toFixed(1)} t/s avg`);
-  console.log(`   flash_attn=1 → ${withFlash.toFixed(1)} t/s avg`);
-  const useFlash = withFlash > without;
-  console.log(useFlash ? '\n   ✅ Keeping flash_attn=1 (faster)' : '\n   ✅ Keeping flash_attn=0 (faster or equal)');
-  const content = buildModelfileContent({
-    sourceModel,
-    vramComment,
-    numCtx,
-    numGpu,
-    numBatch,
-    flashAttn: useFlash,
-    finetunaNote: 'auto-tuned by Finetuna 🐟',
-  });
-  fs.writeFileSync(modelfilePath, content);
-  spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
-  return { useFlash, without, withFlash };
-}
-
 async function maybeRenameWithSuggested(currentName, sourceModel, numCtx, flashAttn) {
   const suggested = suggestModelName(sourceModel.split(':')[0], numCtx, flashAttn);
   if (suggested === currentName) return currentName;
@@ -957,9 +938,8 @@ async function main() {
   console.log("You can tune a guitar... but you can't tunafish! Let's fine-tune some models! 🐟\n");
 
   const flashSupported = detectFlashAttnSupport();
+  /** User/docs intent for -flash naming; flash itself is OLLAMA_FLASH_ATTENTION on the server. */
   let sessionFlashAttn = false;
-  /** When true, flash choice is fixed (flags or user confirm) — skip Phase 3 A/B. */
-  let flashAttnLocked = FLAGS.flashAttn !== null;
   const benchmarkRows = [];
   let pendingResultsLog = null;
 
@@ -970,9 +950,10 @@ async function main() {
     );
   }
   if (flashSupported) {
-    console.log('Flash attention: supported GPU detected (RTX 20xx+ class).\n');
+    console.log('GPU looks flash-attention capable (RTX 20xx+ class).');
+    console.log('Note: enable via OLLAMA_FLASH_ATTENTION=1 on the Ollama *server* (not Modelfile).\n');
   } else if (FLAGS.flashAttn === true) {
-    console.log('⚠️  --flash-attn set but no supported NVIDIA GPU detected — will still inject flags.\n');
+    console.log('⚠️  --flash-attn set but no supported NVIDIA GPU detected — setup tips still apply.\n');
   }
 
   const vramGB = detectVRAM();
@@ -1090,26 +1071,23 @@ async function main() {
 
   if (FLAGS.flashAttn === true) {
     sessionFlashAttn = true;
+    printFlashAttnGuidance();
   } else if (FLAGS.flashAttn === false) {
     sessionFlashAttn = false;
+  } else if (isFlashAttnEnvEnabled()) {
+    sessionFlashAttn = true;
+    console.log('OLLAMA_FLASH_ATTENTION is set in this process environment — tagging model as flash-capable.\n');
   } else if (flashSupported) {
-    if (FLAGS.autoTune) {
-      // Defer to Phase 3 A/B so batch/ctx sweeps stay consistent with the final flash choice
-      sessionFlashAttn = false;
-      flashAttnLocked = false;
-      console.log('Flash attention: will A/B during auto-tune (use --flash-attn / --no-flash-attn to lock).\n');
-    } else {
-      const r = await prompt([
-        {
-          type: 'confirm',
-          name: 'useFlash',
-          message: 'Inject flash_attn 1 + use_mmap 0 for this model? (recommended on RTX 20xx+)',
-          initial: true,
-        },
-      ]);
-      sessionFlashAttn = r.useFlash;
-      flashAttnLocked = true;
-    }
+    const r = await prompt([
+      {
+        type: 'confirm',
+        name: 'useFlash',
+        message: 'Use flash attention on the Ollama server? (prints setup tips; tags -flash name — not a Modelfile param)',
+        initial: true,
+      },
+    ]);
+    sessionFlashAttn = r.useFlash;
+    if (sessionFlashAttn) printFlashAttnGuidance();
   }
 
   const vramComment = vramGB ? `Optimized for ${vramGB}GB VRAM (auto-detected)` : 'Optimized for your GPU';
@@ -1128,7 +1106,6 @@ async function main() {
   let bestBatch = null;
   let beforeMetrics = null;
   let afterMetrics = null;
-  let flashAbResult = null;
 
   console.log('\n📏 Baseline speed (before auto-tune)...');
   beforeMetrics = await collectComparisonMetrics(newName);
@@ -1429,20 +1406,6 @@ async function main() {
     spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
     console.log('\n   ✅ Final model created with optimal settings!');
 
-    if (flashSupported && !flashAttnLocked && FLAGS.flashAttn === null) {
-      flashAbResult = await benchmarkFlashAttn({
-        newName,
-        modelfilePath,
-        sourceModel,
-        vramComment,
-        numCtx: bestCtx,
-        numGpu,
-        numBatch: bestBatch,
-        repeatCount,
-      });
-      sessionFlashAttn = flashAbResult.useFlash;
-    }
-
     console.log('\n📏 Speed after auto-tune...');
     afterMetrics = await collectComparisonMetrics(newName);
     if (afterMetrics.success) {
@@ -1478,7 +1441,6 @@ async function main() {
       after: afterMetrics?.success
         ? { evalRate: afterMetrics.evalRate, promptEvalRate: afterMetrics.promptEvalRate, tpsEval: afterMetrics.tpsEval }
         : null,
-      flashAb: flashAbResult,
       batchResults,
       ctxResults,
       benchmarkRows,

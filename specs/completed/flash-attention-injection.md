@@ -1,12 +1,23 @@
-# Flash Attention + MMAP Injection
+# Flash Attention (server env)
 
-**Status:** completed
+**Status:** completed (corrected)
 
-## Shipped
+## Important
 
-- `detectFlashAttnSupport()` via `nvidia-smi` GPU name (RTX 20xx+, Quadro RTX, T4/A100-class).
-- Modelfile injection: `PARAMETER use_mmap 0` and `PARAMETER flash_attn 1`.
-- `--flash-attn` / `--no-flash-attn` / `FINETUNA_FLASH_ATTN` env override.
-- Interactive prompt on supported GPUs when **not** using `--auto-tune` (choice is locked).
-- With `--auto-tune` and no flash flag, Phase 3 A/B-tests flash on vs off after batch/ctx sweeps so winners stay consistent.
-- `--flash-attn` / `--no-flash-attn` / `FINETUNA_FLASH_ATTN` always lock and skip A/B.
+Ollama does **not** accept `PARAMETER flash_attn` (or `use_mmap` paired for this purpose) in a Modelfile. `ollama create` fails with `unknown parameter 'flash_attn'`.
+
+Flash attention is controlled on the **Ollama server**:
+
+```bash
+OLLAMA_FLASH_ATTENTION=1
+```
+
+See [Ollama FAQ](https://docs.ollama.com/faq). Restart the Ollama app/service after changing it.
+
+## What Finetuna does
+
+- Detects RTX 20xx+ (and similar) GPUs via `nvidia-smi`
+- Prints setup tips for `OLLAMA_FLASH_ATTENTION` (Windows `setx`, bash `export`, systemd)
+- `--flash-attn` / `--no-flash-attn` / `FINETUNA_FLASH_ATTN` control naming (`-flash` suffix) and docs intent only
+- Records flash intent in results/state comments — does **not** inject invalid Modelfile parameters
+- No per-model A/B via recreate (cannot toggle flash without restarting the Ollama server)
