@@ -533,7 +533,7 @@ function contextTierShortLabel(n) {
   return 'Maximum tier';
 }
 
-const STRETCH_CTX = 32768;
+const STRETCH_CTX_FLOOR = 65536;
 
 /**
  * Build num_ctx sweep plan pivoted on the user's chosen size:
@@ -551,11 +551,9 @@ function buildCtxSweepPlan(currentCtx, { openClaw = false } = {}) {
 function getContextOptions(vramGB, { openClaw = false } = {}) {
   const maxCtx = maxSuggestedCtxFromVram(vramGB);
   const opts = [];
-  const seen = new Set();
 
   if (openClaw) {
     for (const t of OPENCLAW_CTX_TIERS) {
-      seen.add(t);
       let label = t === 65536 ? 'OpenClaw target (64K)' : contextTierShortLabel(t);
       if (t > maxCtx) label += ' — may exceed VRAM hint';
       opts.push({ name: `${t}  – ${label}`, value: t });
@@ -564,24 +562,14 @@ function getContextOptions(vramGB, { openClaw = false } = {}) {
     return opts;
   }
 
+  // Always offer the full tier list (through 128K). VRAM only labels stretch options —
+  // previously we hid everything above ~vram*2048, so 8GB cards stopped at 16K/32K.
   for (const t of CONTEXT_TIERS) {
-    if (t > maxCtx) break;
-    seen.add(t);
-    opts.push({ name: `${t}  – ${contextTierShortLabel(t)}`, value: t });
-  }
-  if (opts.length === 0) {
-    seen.add(4096);
-    opts.push({
-      name: '4096  – Default (VRAM estimate low; use Custom if you need more)',
-      value: 4096,
-    });
-  }
-  if (!seen.has(STRETCH_CTX) && maxCtx < STRETCH_CTX) {
-    seen.add(STRETCH_CTX);
-    opts.push({
-      name: `${STRETCH_CTX}  – Stretch (32k; above VRAM hint — may need auto-tune / lower ctx)`,
-      value: STRETCH_CTX,
-    });
+    let label = contextTierShortLabel(t);
+    if (t > maxCtx) {
+      label += t <= STRETCH_CTX_FLOOR ? ' — stretch (above VRAM hint)' : ' — may exceed VRAM hint';
+    }
+    opts.push({ name: `${t}  – ${label}`, value: t });
   }
   // Enquirer Select returns choice.name, not choice.value — use name: 'custom' so the follow-up prompt runs.
   opts.push({ name: 'custom', message: 'Custom (any number you want)' });
