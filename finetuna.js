@@ -48,8 +48,8 @@ function parseFlags() {
           '  --openclaw            OpenClaw Modelfile preset (64K ctx default, gemma4 template, num_keep 64)',
           '  --openclaw-agent      Same as --openclaw with temperature 0.1 / top_k 20 (deterministic agents)',
           '  --no-openclaw         Turn off OpenClaw block even if FINETUNA_OPENCLAW is set',
-          '  --flash-attn          Force flash_attn 1 + use_mmap 0 in Modelfile (RTX 20xx+)',
-          '  --no-flash-attn       Disable flash attention injection',
+          '  --flash-attn          Force flash_attn 1 + use_mmap 0 (locks; skips A/B)',
+          '  --no-flash-attn       Disable flash attention (locks; skips A/B)',
           '  --benchmark-report    Print markdown benchmark table (+ finetuna-benchmark.md)',
           '  --unload, --panic     Evict all loaded models from VRAM (keep_alive: 0)',
           '  --reload              Reload last model from .finetuna-state.json',
@@ -352,17 +352,17 @@ function printAutoTuneComparison(before, after) {
   const aEval = after.evalRate ?? (after.tpsEval !== 'N/A' ? parseFloat(after.tpsEval) : null);
   const bPrompt = before.promptEvalRate ?? null;
   const aPrompt = after.promptEvalRate ?? null;
-  console.log('\n┌──────────────────────┬─────────────┬─────────────┬──────────────┐');
-  console.log('│ Metric               │   Before    │    After    │   Change     │');
-  console.log('├──────────────────────┼─────────────┼─────────────┼──────────────┤');
+  console.log('\n┌──────────────────────────┬─────────────┬─────────────┬──────────────┐');
+  console.log('│ Metric                   │   Before    │    After    │   Change     │');
+  console.log('├──────────────────────────┼─────────────┼─────────────┼──────────────┤');
   const pct = (b, a) => (b && a && b > 0 ? `${(((a - b) / b) * 100).toFixed(1)}%` : '—');
   console.log(
-    `│ eval_rate (gen)      │ ${formatRate(bEval).padStart(11)} │ ${formatRate(aEval).padStart(11)} │ ${pct(bEval, aEval).padStart(12)} │`,
+    `│ eval_rate (gen)          │ ${formatRate(bEval).padStart(11)} │ ${formatRate(aEval).padStart(11)} │ ${pct(bEval, aEval).padStart(12)} │`,
   );
   console.log(
-    `│ prompt_eval_rate     │ ${formatRate(bPrompt).padStart(11)} │ ${formatRate(aPrompt).padStart(11)} │ ${pct(bPrompt, aPrompt).padStart(12)} │`,
+    `│ prompt_eval (long prompt)│ ${formatRate(bPrompt).padStart(11)} │ ${formatRate(aPrompt).padStart(11)} │ ${pct(bPrompt, aPrompt).padStart(12)} │`,
   );
-  console.log('└──────────────────────┴─────────────┴─────────────┴──────────────┘');
+  console.log('└──────────────────────────┴─────────────┴─────────────┴──────────────┘');
 }
 
 function renderBenchmarkMarkdown(rows, modelName) {
@@ -855,12 +855,25 @@ async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '')
 }
 
 async function sampleBenchmarkRates(newName) {
-  const [gen, prompt] = await Promise.all([getSpeedMetrics(newName), getPromptEvalMetrics(newName)]);
-  let vramPeakMiB = queryGpuMemUsedMiB();
+  // Sequential: parallel generates can contend on one loaded model
+  const gen = await getSpeedMetrics(newName);
+  const prompt = await getPromptEvalMetrics(newName);
+  const vramPeakMiB = queryGpuMemUsedMiB();
   return {
     evalRate: gen.success ? gen.evalRate : null,
     promptEvalRate: prompt.success ? prompt.promptEvalRate : null,
     vramPeakMiB,
+  };
+}
+
+/** Generation + long-prompt ingestion rates for before/after comparison. */
+async function collectComparisonMetrics(newName) {
+  const gen = await getSpeedMetrics(newName);
+  if (!gen.success) return gen;
+  const prompt = await getPromptEvalMetrics(newName);
+  return {
+    ...gen,
+    promptEvalRate: prompt.success ? (prompt.promptEvalRate ?? (prompt.promptTps !== 'N/A' ? parseFloat(prompt.promptTps) : null)) : null,
   };
 }
 
@@ -945,7 +958,10 @@ async function main() {
 
   const flashSupported = detectFlashAttnSupport();
   let sessionFlashAttn = false;
+  /** When true, flash choice is fixed (flags or user confirm) — skip Phase 3 A/B. */
+  let flashAttnLocked = FLAGS.flashAttn !== null;
   const benchmarkRows = [];
+  let pendingResultsLog = null;
 
   if (FLAGS.openClaw) {
     const agentNote = FLAGS.openClawAgent ? ' (agent sampling: temperature 0.1, top_k 20)' : '';
@@ -1018,7 +1034,12 @@ async function main() {
 
   if (FLAGS.openClaw) {
     const maxCtx = maxSuggestedCtxFromVram(vramGB);
-    if (maxCtx < 65536) {
+    if (vramGB == null) {
+      console.log(
+        '⚠️  OpenClaw recommends 65536 context, but VRAM could not be detected.\n' +
+          '   64K may not fit — start high and let auto-tune / GPU-fit step down, or pick a smaller model / Q4_K_M.\n',
+      );
+    } else if (maxCtx < 65536) {
       console.log(
         '⚠️  OpenClaw recommends 65536 context. Your VRAM hint suggests a lower ceiling — 64K may not fit.\n' +
           '   Try a smaller model or Q4_K_M quantization if auto-tune cannot reach 100% GPU at 64K.\n',
@@ -1072,15 +1093,23 @@ async function main() {
   } else if (FLAGS.flashAttn === false) {
     sessionFlashAttn = false;
   } else if (flashSupported) {
-    const r = await prompt([
-      {
-        type: 'confirm',
-        name: 'useFlash',
-        message: 'Inject flash_attn 1 + use_mmap 0 for this model? (recommended on RTX 20xx+)',
-        initial: true,
-      },
-    ]);
-    sessionFlashAttn = r.useFlash;
+    if (FLAGS.autoTune) {
+      // Defer to Phase 3 A/B so batch/ctx sweeps stay consistent with the final flash choice
+      sessionFlashAttn = false;
+      flashAttnLocked = false;
+      console.log('Flash attention: will A/B during auto-tune (use --flash-attn / --no-flash-attn to lock).\n');
+    } else {
+      const r = await prompt([
+        {
+          type: 'confirm',
+          name: 'useFlash',
+          message: 'Inject flash_attn 1 + use_mmap 0 for this model? (recommended on RTX 20xx+)',
+          initial: true,
+        },
+      ]);
+      sessionFlashAttn = r.useFlash;
+      flashAttnLocked = true;
+    }
   }
 
   const vramComment = vramGB ? `Optimized for ${vramGB}GB VRAM (auto-detected)` : 'Optimized for your GPU';
@@ -1102,7 +1131,16 @@ async function main() {
   let flashAbResult = null;
 
   console.log('\n📏 Baseline speed (before auto-tune)...');
-  beforeMetrics = await runTestPromptWithSpeed(newName);
+  beforeMetrics = await collectComparisonMetrics(newName);
+  if (beforeMetrics.success) {
+    console.log('\n✅ Response:');
+    if (beforeMetrics.output) console.log(beforeMetrics.output.trim());
+    printSpeedSummary(beforeMetrics, { title: 'Baseline performance' });
+  } else {
+    console.log('⚠️  Could not measure baseline speed.');
+    if (beforeMetrics.errMsg) console.log('   Error:', beforeMetrics.errMsg);
+  }
+  let measuredSinceCreate = Boolean(beforeMetrics?.success);
   let autoTune = FLAGS.autoTune;
   if (!autoTune) {
     const r = await prompt([
@@ -1250,22 +1288,24 @@ async function main() {
         if (!gpuOk) {
           console.log(`   ⚠️  num_ctx=${cand} doesn't fit 100% GPU`);
           ctxResults.push({ cand, avg: 0, gpu: false });
-          return { ok: false };
+          return { ok: false, gpuMiss: true };
         }
         const avg = await benchmarkModel(newName, repeatCount, `[ctx=${cand}] `);
         ctxResults.push({ cand, avg, gpu: true });
-        return { ok: true, avg };
+        // ok only when benches produced a usable rate (GPU-fit alone is not enough to early-stop)
+        return { ok: avg > 0, avg, gpuOk: true };
       }
 
       // 1) Test the user's chosen context first
       const currentResult = await tryCtxCandidate(plan.current);
-      let currentFits = currentResult.ok;
+      let currentFits = currentResult.ok || currentResult.gpuOk;
 
       if (!currentFits) {
-        // 2a) Step down until something fits (first fit is the largest below current)
+        // 2a) Step down until something fits (first usable fit is the largest below current)
         console.log('\n   Current size does not fit — stepping down…');
         for (const cand of plan.lowerDesc) {
           const r = await tryCtxCandidate(cand);
+          if (r.createFailed) continue;
           if (r.ok) {
             currentFits = true;
             // For max-context, largest that fits is this first success (descending)
@@ -1277,24 +1317,32 @@ async function main() {
               break;
             }
             // max-speed: keep going down to compare TPS at smaller windows
+          } else if (r.gpuOk && ctxGoal === 'max-context') {
+            // GPU fit but benches failed — keep looking for a measurable size
+            currentFits = true;
           }
         }
-        // Current already failed — larger sizes will not fit either
+        // Current already failed GPU — larger sizes will not fit either
         for (const skip of plan.higherAsc) {
           ctxResults.push({ cand: skip, avg: 0, gpu: false });
         }
       } else {
-        // 2b) Current fits — probe upward until one fails, then stop
+        // 2b) Current fits — probe upward until a true VRAM miss, then stop
         if (plan.higherAsc.length) console.log('\n   Current size fits — probing larger contexts…');
         for (const cand of plan.higherAsc) {
           const r = await tryCtxCandidate(cand);
-          if (!r.ok) {
-            console.log('   Larger size failed — skipping remaining bigger candidates.');
+          if (r.createFailed) {
+            console.log('   Create failed — trying next larger candidate…');
+            continue;
+          }
+          if (r.gpuMiss) {
+            console.log('   Larger size failed GPU fit — skipping remaining bigger candidates.');
             for (const skip of plan.higherAsc.filter((c) => c > cand)) {
               ctxResults.push({ cand: skip, avg: 0, gpu: false });
             }
             break;
           }
+          // gpuOk with avg 0: continue probing (timeout fluke should not kill the sweep)
         }
         // max-speed: also measure smaller sizes that should still fit (for TPS comparison)
         if (ctxGoal === 'max-speed' && plan.lowerDesc.length) {
@@ -1346,8 +1394,14 @@ async function main() {
           console.log(`\n   ✅ Fastest at 100% GPU: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
         }
       } else {
-        console.log('\n   ⚠️  No contexts fit 100% GPU — keeping original.');
-        bestCtx = currentCtx;
+        const gpuOnly = [...ctxResults].filter((r) => r.gpu).sort((a, b) => b.cand - a.cand)[0];
+        if (gpuOnly) {
+          bestCtx = gpuOnly.cand;
+          console.log(`\n   ⚠️  Benchmarks failed; using largest GPU-fitting context (${bestCtx}) without TPS data.`);
+        } else {
+          console.log('\n   ⚠️  No contexts fit 100% GPU — keeping original.');
+          bestCtx = currentCtx;
+        }
       }
     } else {
       console.log('  Skipping Phase 2 (--skip-ctx).');
@@ -1375,7 +1429,7 @@ async function main() {
     spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
     console.log('\n   ✅ Final model created with optimal settings!');
 
-    if (flashSupported && FLAGS.flashAttn === null) {
+    if (flashSupported && !flashAttnLocked && FLAGS.flashAttn === null) {
       flashAbResult = await benchmarkFlashAttn({
         newName,
         modelfilePath,
@@ -1390,8 +1444,14 @@ async function main() {
     }
 
     console.log('\n📏 Speed after auto-tune...');
-    afterMetrics = await runTestPromptWithSpeed(newName);
+    afterMetrics = await collectComparisonMetrics(newName);
+    if (afterMetrics.success) {
+      console.log('\n✅ Response:');
+      if (afterMetrics.output) console.log(afterMetrics.output.trim());
+      printSpeedSummary(afterMetrics, { title: 'After auto-tune' });
+    }
     printAutoTuneComparison(beforeMetrics, afterMetrics);
+    measuredSinceCreate = Boolean(afterMetrics?.success);
 
     if (FLAGS.benchmarkReport || benchmarkRows.length > 0) {
       const sample = await sampleBenchmarkRates(newName);
@@ -1406,8 +1466,8 @@ async function main() {
       });
     }
 
-    // Write benchmark results to JSON log
-    const resultsLog = {
+    // Defer writing until after optional rename so model name matches --reload state
+    pendingResultsLog = {
       timestamp: new Date().toISOString(),
       model: newName,
       source: sourceModel,
@@ -1423,13 +1483,16 @@ async function main() {
       ctxResults,
       benchmarkRows,
     };
-    const resultsPath = path.join(process.cwd(), 'finetuna-results.json');
-    fs.writeFileSync(resultsPath, JSON.stringify(resultsLog, null, 2));
-    console.log(`\n   💾 Results saved to finetuna-results.json`);
+
+    // Final settings came from GPU-fitting candidates when Phase 2 found any
+    fullGPU = ctxResults.some((r) => r.gpu) || (FLAGS.skipCtx && batchResults.some((r) => r.gpu));
   }
 
   while (!fullGPU) {
-    if (!autoTune) await runTestPromptWithSpeed(newName);
+    if (!autoTune && !measuredSinceCreate) {
+      await runTestPromptWithSpeed(newName);
+      measuredSinceCreate = true;
+    }
     fullGPU = await checkGPUFit(newName);
 
     if (!fullGPU) {
@@ -1438,8 +1501,10 @@ async function main() {
       ]);
       if (!reduce) break;
 
-      const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter((o) => o.value !== 'custom' && o.value < currentCtx);
-      if (lowerOptions.length === 0) lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
+      const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter(
+        (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
+      );
+      lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
 
       const { newCtxChoice } = await prompt([{ type: 'select', name: 'newCtxChoice', message: 'Pick a lower context size to try:', choices: lowerOptions }]);
       const rawNew = unwrapChoice(newCtxChoice);
@@ -1464,12 +1529,21 @@ async function main() {
       fs.writeFileSync(modelfilePath, newContent);
       spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
       console.log('✅ Model recreated with lower context — back in the water!');
+      measuredSinceCreate = false;
     } else {
       break;
     }
   }
 
   let finalName = await maybeRenameWithSuggested(newName, sourceModel, currentCtx, sessionFlashAttn);
+
+  if (pendingResultsLog) {
+    pendingResultsLog.model = finalName;
+    pendingResultsLog.alsoAs = finalName !== newName ? newName : undefined;
+    const resultsPath = path.join(process.cwd(), 'finetuna-results.json');
+    fs.writeFileSync(resultsPath, JSON.stringify(pendingResultsLog, null, 2));
+    console.log(`\n   💾 Results saved to finetuna-results.json`);
+  }
 
   writeFinetunaState({
     model: finalName,

@@ -1,154 +1,118 @@
 # Finetuna
 
-> Finetuna — an interactive Node.js helper to tune Ollama models.
+Interactive CLI that finds good Ollama settings for your GPU — context window, batch size, and optional flash attention — then writes a reusable Modelfile and creates the tuned model.
 
-**Overview**
+## What it does
 
-Finetuna is a small CLI utility that helps create a `Modelfile`, run `ollama create` with sensible defaults, measure GPU fit, and iteratively shrink context (and optionally auto-tune batch/context) until the model behaves the way you want on the GPU.
+You pick a source model and a starting context size. Finetuna:
 
-**Use cases**
+1. Writes **`Modelfile-finetuna`** and runs **`ollama create`**
+2. Checks whether the model is fully on the GPU (`100% GPU` in `ollama ps`)
+3. Optionally **auto-tunes** `num_batch` and `num_ctx` with benchmarks, pivoting from your chosen context (test current first, step down only if needed, then probe larger sizes)
+4. Reports **`eval_rate`** / **`prompt_eval_rate`** (with a before/after table when auto-tune runs)
+5. Can suggest a self-documenting name like `gemma4-ctx32k-flash`
 
-- **GPU-focused setup:** Try context and batch settings so workloads offload cleanly to the GPU and VRAM use matches what you have.
-- **Faster iteration:** Less manual guessing—guided prompts, optional auto-tune benchmarks, and a saved `Modelfile-finetuna` you can edit.
-- **Deployment prep:** Produce a repeatable Ollama model recipe before you wire the same name into apps or agents.
+The goal is an **optimum that still fits in VRAM**, not “always shrink context.” If your pick already fits, auto-tune looks upward for more context (or for speed, compares nearby sizes).
 
-**Core functionality**
+## Prerequisites
 
-- Detects GPU VRAM when possible (NVIDIA `nvidia-smi`, AMD `rocm-smi`, then Windows WMI; some systems still need manual context picks).
-- Lists Ollama models, prompts for a source model and a new name, and writes **`Modelfile-finetuna`** with `num_ctx`, `num_gpu`, and `num_batch`.
-- Runs **`ollama create`** and checks GPU offload (e.g. via `ollama ps`).
-- If the model is not fully on GPU, offers stepping down context (and optional **auto-tune**: `num_batch` / `num_ctx` sweeps with benchmarks).
-- Reports **`eval_rate`** and **`prompt_eval_rate`** from Ollama, with a before/after table when auto-tune runs.
-- **OpenClaw preset** (`--openclaw`): 64K context default, `num_keep 64`, gemma4 template block; **`--openclaw-agent`** for deterministic agent sampling.
-- **Flash attention** on RTX 20xx+ (`--flash-attn` / `--no-flash-attn`); auto-tune can A/B test flash vs no-flash.
-- **VRAM panic** (`--unload` / `--panic`) evicts loaded models; **`--reload`** warms the last Finetuna model from `.finetuna-state.json`.
-- Optional **`--benchmark-report`** markdown table and self-documenting model names (`model-ctx32k-flash`).
-
-**Prerequisites**
-
-- Node.js **v18+**
+- Node.js **18+**
 - [pnpm](https://pnpm.io/installation)
-- [Ollama](https://ollama.ai) installed and running
-- Optional: `nvidia-smi`, AMD `rocm-smi`, or Windows PowerShell for better VRAM hints
+- [Ollama](https://ollama.com) installed and running, with at least one model pulled
+- Optional: `nvidia-smi` (or AMD `rocm-smi` / Windows WMI) for VRAM hints and flash-attention detection
 
-**Installation**
-
-1. Clone the repo:
+## Install
 
 ```bash
-git clone <your-repo-url>
-cd <repo>
-```
-
-2. Install dependencies:
-
-```bash
+git clone git@github.com:Catalyst-Forge-LLC/finetuna.git
+cd finetuna
 pnpm install
 ```
 
-**Usage**
+HTTPS: `https://github.com/Catalyst-Forge-LLC/finetuna.git`
 
-```bash
-node finetuna.js
-```
+## Quick start
 
 ```bash
 pnpm start
+# or: node finetuna.js
 ```
 
-`node finetuna.js --help` lists flags (`--auto-tune`, `--openclaw`, `--flash-attn`, `--benchmark-report`, `--unload`, timeouts, skipping benchmark phases, etc.).
-
-**OpenClaw:** use **`--openclaw`** (or **`FINETUNA_OPENCLAW=1`**) for 64K context default, `num_keep 64`, and Gemma4 `TEMPLATE` / `RENDERER` / `PARSER`. Use **`--openclaw-agent`** for `temperature 0.1` and `top_k 20`. Context steps *down* from 64K when VRAM is tight. **`--no-openclaw`** disables the block even if the env var is set.
-
-**VRAM panic:** `node finetuna.js --unload` (alias `--panic`) evicts all loaded models via `keep_alive: 0`. **`--reload`** loads the last model saved in `.finetuna-state.json`.
-
-**Flash attention (RTX 20xx+):** Finetuna can inject `use_mmap 0` and `flash_attn 1`. Use **`--flash-attn`** to force on, **`--no-flash-attn`** to force off, or accept the prompt on supported GPUs. During auto-tune, flash is A/B tested when left on auto.
+Follow the prompts: choose a model, name the tuned variant, pick context / batch / GPU layers, then optionally run auto-tune.
 
 ```bash
+ollama run your-model-name
+```
+
+Useful one-liners:
+
+```bash
+node finetuna.js --auto-tune
 node finetuna.js --openclaw --auto-tune
 node finetuna.js --benchmark-report
-node finetuna.js --unload
+node finetuna.js --unload          # free VRAM (alias: --panic)
+node finetuna.js --reload          # warm last model from .finetuna-state.json
+node finetuna.js --help
 ```
 
-```bash
-ollama run <your-model-name>
-```
+## Flags (overview)
 
-**Outputs**
+| Flag | Purpose |
+|------|---------|
+| `--auto-tune` | Run batch/context (and optional flash A/B) benchmarks without the confirm prompt |
+| `--skip-batch` / `--skip-ctx` | Skip Phase 1 or Phase 2 of auto-tune |
+| `--openclaw` | OpenClaw preset: 64K context default, `num_keep 64`, Gemma4 template block |
+| `--openclaw-agent` | Same as `--openclaw` plus `temperature 0.1` / `top_k 20` |
+| `--no-openclaw` | Disable OpenClaw block even if `FINETUNA_OPENCLAW` is set |
+| `--flash-attn` / `--no-flash-attn` | Force flash attention on or off |
+| `--benchmark-report` | Print a markdown table and write `finetuna-benchmark.md` |
+| `--unload` / `--panic` | Evict loaded models from VRAM (`keep_alive: 0`) |
+| `--reload` | Load the last Finetuna model from `.finetuna-state.json` |
+| `--verbose` | Extra API / `ollama` diagnostics |
+| `--timeout` / `--gen-timeout` / `--bench-repeats` | Timing and repeat controls |
 
-- **`Modelfile-finetuna`** — generated by the script (re-written when Finetuna recreates the model).
-- **`finetuna-results.json`** — auto-tune benchmark log (includes eval rates and before/after when tuned).
-- **`finetuna-benchmark.md`** — optional markdown report with `--benchmark-report`.
-- **`.finetuna-state.json`** — last model/config for `--reload` (gitignored).
+With `--auto-tune` and no flash flag, Finetuna A/B-tests flash attention after batch/ctx sweeps so winners stay consistent. If you answer the flash prompt (non–auto-tune runs) or pass `--flash-attn` / `--no-flash-attn`, that choice is locked.
 
-**Environment variables**
+## Outputs
+
+| File | When |
+|------|------|
+| `Modelfile-finetuna` | Every create / recreate (safe to edit; Finetuna overwrites on the next recreate) |
+| `finetuna-results.json` | After auto-tune (rates, before/after, settings; model name matches rename if you accepted it) |
+| `finetuna-benchmark.md` | With `--benchmark-report` |
+| `.finetuna-state.json` | End of a normal run — used by `--reload` (gitignored) |
+
+## Environment variables
 
 | Variable | Role | Default |
-|----------|------|--------|
-| `OLLAMA_HOST` | Ollama HTTP API base URL. | `http://127.0.0.1:11434` |
-| `FINETUNA_TIMEOUT` | Timeout for prompt-eval / short API calls (ms). | `20000` |
-| `FINETUNA_GEN_TIMEOUT` | Timeout for generation benchmarks and first `/api/generate` after create (ms). Large models may need `120000` or more on cold load; Finetuna retries once with a longer deadline and falls back to `ollama run` when useful. | `60000` |
-| `BENCH_REPEATS` | Repeats per candidate during auto-tune. | `3` |
-| `FINETUNA_OPENCLAW` | If `1` / `true` / `yes`, same as `--openclaw`. | off |
-| `FINETUNA_FLASH_ATTN` | `1` / `true` force flash on; `0` / `false` force off; unset = auto on supported GPUs. | auto |
-
-Examples:
-
-Unix / macOS (bash/zsh):
+|----------|------|---------|
+| `OLLAMA_HOST` | Ollama HTTP API base | `http://127.0.0.1:11434` |
+| `FINETUNA_TIMEOUT` | Prompt-eval / short API timeout (ms) | `20000` |
+| `FINETUNA_GEN_TIMEOUT` | Generation benchmark timeout (ms). Large cold loads may need `120000+` | `60000` |
+| `BENCH_REPEATS` | Auto-tune repeats per candidate | `3` |
+| `FINETUNA_OPENCLAW` | `1` / `true` / `yes` → same as `--openclaw` | off |
+| `FINETUNA_FLASH_ATTN` | `1`/`true` force on; `0`/`false` force off; unset = auto | auto |
 
 ```bash
-export OLLAMA_HOST=http://127.0.0.1:11434
-export FINETUNA_TIMEOUT=30000
+# bash / zsh
 export FINETUNA_GEN_TIMEOUT=120000
 export BENCH_REPEATS=5
 pnpm start
 ```
 
-PowerShell (Windows):
-
 ```powershell
-$env:FINETUNA_TIMEOUT = '30000'
 $env:FINETUNA_GEN_TIMEOUT = '120000'
 $env:BENCH_REPEATS = '5'
 pnpm start
 ```
 
-CMD (Windows):
+## Tips
 
-```cmd
-set FINETUNA_TIMEOUT=30000
-set FINETUNA_GEN_TIMEOUT=120000
-set BENCH_REPEATS=5
-pnpm start
-```
+- **VRAM detection** is best-effort. If it fails, pick context manually (or use OpenClaw’s 64K starting point and let GPU-fit / auto-tune step down).
+- **Auto-tune** recreates the model many times — leave time, and lower `BENCH_REPEATS` for a quicker pass.
+- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`
+- **`--verbose`** helps when HTTP calls fail or the host URL is wrong.
 
-**Notes & tips**
-
-- **VRAM hints** are best-effort; Apple Silicon and odd GPUs may not report size—use **Custom** context or the **32k stretch** preset when offered.
-- **Remote Ollama:** set `OLLAMA_HOST`, e.g. `http://192.168.1.10:11434`.
-- **Auto-tune** recreates the model many times and uses the GPU for benchmarks—run when you have time. Control load with `BENCH_REPEATS` and timeouts.
-- You can hand-edit **`Modelfile-finetuna`**; the script overwrites it on the next Finetuna run that recreates the model.
-- Use **`--verbose`** once if HTTP/API steps fail and you need the resolved `OLLAMA_HOST` and error hints.
-
-**Git / publishing**
-
-Ignore large local blobs and Ollama artifacts; see `.gitignore`.
-
-Quick publish steps:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit: add finetuna"
-git branch -M main
-git remote add origin git@github.com:YOUR_USERNAME/YOUR_REPO.git
-git push -u origin main
-```
-
-Replace `YOUR_USERNAME` / `YOUR_REPO` with your repo, or create it on GitHub first and use the instructions there.
-
-**License**
+## License
 
 [MIT](LICENSE)
-
-Enjoy tuning!
