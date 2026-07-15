@@ -454,6 +454,19 @@ function contextTierShortLabel(n) {
 
 const STRETCH_CTX = 32768;
 
+/**
+ * Build num_ctx sweep plan pivoted on the user's chosen size:
+ * test current first → step down only if it fails GPU fit → then probe upward.
+ */
+function buildCtxSweepPlan(currentCtx, { openClaw = false } = {}) {
+  const pool = openClaw ? [...OPENCLAW_CTX_TIERS] : [...CONTEXT_TIERS];
+  if (!pool.includes(currentCtx)) pool.push(currentCtx);
+  const tiers = [...new Set(pool.filter((c) => c >= 2048))].sort((a, b) => a - b);
+  const lowerDesc = tiers.filter((c) => c < currentCtx).sort((a, b) => b - a);
+  const higherAsc = tiers.filter((c) => c > currentCtx);
+  return { current: currentCtx, lowerDesc, higherAsc };
+}
+
 function getContextOptions(vramGB, { openClaw = false } = {}) {
   const maxCtx = maxSuggestedCtxFromVram(vramGB);
   const opts = [];
@@ -1206,55 +1219,96 @@ async function main() {
         },
       ]);
 
-      // Build context candidates
-      let ctxCandidates;
-      if (FLAGS.openClaw) {
-        ctxCandidates = OPENCLAW_CTX_TIERS.filter((c) => c <= currentCtx && c >= 2048);
-      } else {
-        ctxCandidates = Array.from(
-          new Set([4096, 8192, 12288, 16384, 24576, 32768, currentCtx].filter((c) => c <= currentCtx * 2 && c >= 2048)),
-        ).sort((a, b) => a - b);
-      }
+      // Pivot on the chosen size: current first → down if needed → up if it fits
+      const plan = buildCtxSweepPlan(currentCtx, { openClaw: FLAGS.openClaw });
+      const preview = [plan.current, ...plan.lowerDesc, ...plan.higherAsc];
 
       console.log('   Strategy:   ' + (ctxGoal === 'max-context' ? 'Largest context that fits 100% GPU' : 'Fastest generation speed at 100% GPU'));
-      console.log('   Candidates: ' + ctxCandidates.join(', '));
+      console.log(`   Pivot:      ${plan.current} (test current first; step down only if it fails; then probe up)`);
+      console.log('   Candidates: ' + preview.join(', '));
       console.log('   Repeats: ' + repeatCount);
       console.log('   Only candidates with 100% GPU offload will be kept.\n');
 
-      for (let ci = 0; ci < ctxCandidates.length; ci++) {
-        const cand = ctxCandidates[ci];
-        console.log(`\n🐟 [${ci + 1}/${ctxCandidates.length}] num_ctx = ${cand}`);
-        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: cand, numGpu, numBatch: bestBatch, flashAttn: sessionFlashAttn });
+      async function tryCtxCandidate(cand) {
+        console.log(`\n🐟 num_ctx = ${cand}${cand === currentCtx ? ' (current)' : ''}`);
+        const content = buildModelfileContent({
+          sourceModel,
+          vramComment,
+          numCtx: cand,
+          numGpu,
+          numBatch: bestBatch,
+          flashAttn: sessionFlashAttn,
+        });
         fs.writeFileSync(modelfilePath, content);
         const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
         if (createResult.status !== 0) {
           console.log('   ⚠️  Failed to create model — skipping');
           ctxResults.push({ cand, avg: 0, gpu: false });
-          continue;
+          return { ok: false, createFailed: true };
         }
-
         const gpuOk = await checkGPUFit(newName);
         if (!gpuOk) {
-          console.log(`   ⚠️  num_ctx=${cand} doesn't fit 100% GPU — skipping`);
+          console.log(`   ⚠️  num_ctx=${cand} doesn't fit 100% GPU`);
           ctxResults.push({ cand, avg: 0, gpu: false });
-          if (FLAGS.openClaw) {
-            continue;
-          }
-          console.log('   Bailing on remaining larger sizes');
-          for (let ri = ci + 1; ri < ctxCandidates.length; ri++) {
-            ctxResults.push({ cand: ctxCandidates[ri], avg: 0, gpu: false });
-          }
-          break;
+          return { ok: false };
         }
-
         const avg = await benchmarkModel(newName, repeatCount, `[ctx=${cand}] `);
         ctxResults.push({ cand, avg, gpu: true });
+        return { ok: true, avg };
+      }
+
+      // 1) Test the user's chosen context first
+      const currentResult = await tryCtxCandidate(plan.current);
+      let currentFits = currentResult.ok;
+
+      if (!currentFits) {
+        // 2a) Step down until something fits (first fit is the largest below current)
+        console.log('\n   Current size does not fit — stepping down…');
+        for (const cand of plan.lowerDesc) {
+          const r = await tryCtxCandidate(cand);
+          if (r.ok) {
+            currentFits = true;
+            // For max-context, largest that fits is this first success (descending)
+            if (ctxGoal === 'max-context') {
+              console.log('   Found a fitting size — skipping remaining smaller candidates (max-context).');
+              for (const skip of plan.lowerDesc.filter((c) => c < cand)) {
+                ctxResults.push({ cand: skip, avg: 0, gpu: false });
+              }
+              break;
+            }
+            // max-speed: keep going down to compare TPS at smaller windows
+          }
+        }
+        // Current already failed — larger sizes will not fit either
+        for (const skip of plan.higherAsc) {
+          ctxResults.push({ cand: skip, avg: 0, gpu: false });
+        }
+      } else {
+        // 2b) Current fits — probe upward until one fails, then stop
+        if (plan.higherAsc.length) console.log('\n   Current size fits — probing larger contexts…');
+        for (const cand of plan.higherAsc) {
+          const r = await tryCtxCandidate(cand);
+          if (!r.ok) {
+            console.log('   Larger size failed — skipping remaining bigger candidates.');
+            for (const skip of plan.higherAsc.filter((c) => c > cand)) {
+              ctxResults.push({ cand: skip, avg: 0, gpu: false });
+            }
+            break;
+          }
+        }
+        // max-speed: also measure smaller sizes that should still fit (for TPS comparison)
+        if (ctxGoal === 'max-speed' && plan.lowerDesc.length) {
+          console.log('\n   Measuring smaller contexts for speed comparison…');
+          for (const cand of plan.lowerDesc) {
+            await tryCtxCandidate(cand);
+          }
+        }
       }
 
       const ctxValid = ctxResults.filter((r) => r.gpu && r.avg > 0);
 
-      // Sort table by TPS descending for display
-      const ctxDisplay = [...ctxResults];
+      // Display by context size ascending
+      const ctxDisplay = [...ctxResults].sort((a, b) => a.cand - b.cand);
       const ctxValidSorted = [...ctxValid].sort((a, b) => b.avg - a.avg);
 
       // Pick winner based on strategy
