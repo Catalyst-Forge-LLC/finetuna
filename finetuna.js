@@ -248,27 +248,53 @@ function isFlashAttnEnvEnabled() {
 }
 
 function printFlashAttnGuidance() {
-  console.log(
-    [
-      '',
-      'Flash attention is enabled on the Ollama *server*, not via Modelfile parameters',
-      '(PARAMETER flash_attn is not valid — ollama create will reject it).',
-      '',
-      'Set this before starting Ollama, then restart the Ollama app/service:',
-      '',
-      '  Windows (then quit & relaunch Ollama from the tray):',
+  const isWin = process.platform === 'win32';
+  const isMac = process.platform === 'darwin';
+  const lines = [
+    '',
+    'Flash attention is enabled on the Ollama *server*, not via Modelfile parameters',
+    '(PARAMETER flash_attn is not valid — ollama create will reject it).',
+    '',
+    'Set OLLAMA_FLASH_ATTENTION=1 on the machine that runs Ollama, then restart Ollama:',
+    '',
+  ];
+
+  if (isWin) {
+    lines.push(
+      '  Windows (quit Ollama from the tray, then relaunch):',
       '    setx OLLAMA_FLASH_ATTENTION 1',
       '',
-      '  bash / zsh (same shell that starts `ollama serve`):',
+      '  Or for this session only before starting ollama serve:',
+      '    set OLLAMA_FLASH_ATTENTION=1',
+      '',
+    );
+  } else if (isMac) {
+    lines.push(
+      '  macOS (then quit & relaunch the Ollama app):',
+      '    launchctl setenv OLLAMA_FLASH_ATTENTION 1',
+      '',
+      '  Or for a terminal `ollama serve`:',
       '    export OLLAMA_FLASH_ATTENTION=1',
+      '    ollama serve',
       '',
-      '  Linux systemd override:',
-      '    Environment=OLLAMA_FLASH_ATTENTION=1',
+    );
+  } else {
+    lines.push(
+      '  Linux — systemd (typical install; then restart the service):',
+      '    sudo mkdir -p /etc/systemd/system/ollama.service.d',
+      "    echo -e '[Service]\\nEnvironment=\"OLLAMA_FLASH_ATTENTION=1\"' | sudo tee /etc/systemd/system/ollama.service.d/flash.conf",
+      '    sudo systemctl daemon-reload',
+      '    sudo systemctl restart ollama',
       '',
-      '  FAQ: https://docs.ollama.com/faq',
+      '  Linux — terminal `ollama serve` only:',
+      '    export OLLAMA_FLASH_ATTENTION=1',
+      '    ollama serve',
       '',
-    ].join('\n'),
-  );
+    );
+  }
+
+  lines.push('  FAQ: https://docs.ollama.com/faq', '');
+  console.log(lines.join('\n'));
 }
 
 function queryGpuMemUsedMiB() {
