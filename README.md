@@ -23,7 +23,7 @@ Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on
 
 ## What a run looks like
 
-1. Choose a source model and a new name (list grouped vs your VRAM: tight / likely too large / cloud)  
+1. Choose a source model and a new name (list grouped vs **free** VRAM when nvidia-smi reports it; flags tight / too large / cloud)  
 2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft VRAM guide are labeled ambitious — not a hard limit)  
 3. Finetuna writes **`Modelfile-finetuna`** and runs **`ollama create`**  
 4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false` for clean benches)  
@@ -38,7 +38,7 @@ Goal: an **optimum that still fits in VRAM** — not “always shrink context.�
 - Node.js **18+**
 - [pnpm](https://pnpm.io/installation)
 - [Ollama](https://ollama.com) installed and running, with at least one model pulled
-- Optional: `nvidia-smi` (or AMD `rocm-smi` / Windows WMI) for VRAM hints
+- Optional: `nvidia-smi` (or AMD `rocm-smi` / Windows WMI) for total **and free** VRAM hints (catches Hermes / ComfyUI / browsers holding the GPU)
 
 ## Install
 

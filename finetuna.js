@@ -331,7 +331,7 @@ function printOomGuidance({ sourceModel, vramGB, numCtx, errMsg, sameAllocAsBefo
 
   if (kind === 'wont_fit') {
     console.log(`\n💥 ${sourceModel} won't fit ${vram} (OOM at num_ctx=${numCtx}: ${detail}).`);
-    console.log('   Lowering context will not help. Use a smaller model/quant, or restart Ollama and check nvidia-smi.');
+    console.log('   Lowering context will not help. Use a smaller model/quant, free other GPU apps (Hermes), or restart Ollama.');
     return kind;
   }
   if (kind === 'kv') {
@@ -451,12 +451,186 @@ function printFlashAttnGuidance() {
 }
 
 function queryGpuMemUsedMiB() {
+  const mem = detectGpuMemory();
+  return mem?.usedMiB ?? null;
+}
+
+/**
+ * Total / used / free VRAM + compute-app names (NVIDIA).
+ * Free matters when Hermes, ComfyUI, browsers, etc. already hold the card.
+ * @returns {{ vendor: string, totalMiB: number, usedMiB: number|null, freeMiB: number|null, totalGB: number, usedGB: number|null, freeGB: number|null, processes: {pid:string,name:string,usedMiB:number|null}[] } | null}
+ */
+function detectGpuMemory() {
   try {
-    const raw = execSync('nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits', { encoding: 'utf8' }).trim();
-    return parseInt(raw.split('\n')[0], 10);
+    const raw = execSync(
+      'nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits',
+      { encoding: 'utf8', timeout: 8000 },
+    )
+      .trim()
+      .split('\n')[0];
+    const parts = raw.split(',').map((s) => parseInt(s.trim(), 10));
+    const totalMiB = parts[0];
+    const usedMiB = Number.isFinite(parts[1]) ? parts[1] : null;
+    const freeMiB = Number.isFinite(parts[2]) ? parts[2] : null;
+    if (!Number.isFinite(totalMiB) || totalMiB < 1) throw new Error('bad nvidia-smi');
+    return {
+      vendor: 'nvidia',
+      totalMiB,
+      usedMiB,
+      freeMiB,
+      totalGB: Math.max(1, Math.round(totalMiB / 1024)),
+      usedGB: usedMiB != null ? Math.round((usedMiB / 1024) * 10) / 10 : null,
+      freeGB: freeMiB != null ? Math.round((freeMiB / 1024) * 10) / 10 : null,
+      processes: listGpuComputeApps(),
+    };
   } catch {
-    return null;
+    try {
+      const rocm = execSync('rocm-smi --showmeminfo vram', { encoding: 'utf8', timeout: 8000 });
+      const totalB = rocm.match(/VRAM Total Memory \(B\):\s*(\d+)/i);
+      const usedB = rocm.match(/VRAM Total Used Memory \(B\):\s*(\d+)/i);
+      if (!totalB) throw new Error('no rocm total');
+      const totalMiB = Math.round(parseInt(totalB[1], 10) / (1024 * 1024));
+      const usedMiB = usedB ? Math.round(parseInt(usedB[1], 10) / (1024 * 1024)) : null;
+      const freeMiB = usedMiB != null ? Math.max(0, totalMiB - usedMiB) : null;
+      return {
+        vendor: 'amd',
+        totalMiB,
+        usedMiB,
+        freeMiB,
+        totalGB: Math.max(1, Math.round(totalMiB / 1024)),
+        usedGB: usedMiB != null ? Math.round((usedMiB / 1024) * 10) / 10 : null,
+        freeGB: freeMiB != null ? Math.round((freeMiB / 1024) * 10) / 10 : null,
+        processes: [],
+      };
+    } catch {
+      try {
+        const ps = execSync(
+          'powershell -Command "(Get-CimInstance Win32_VideoController | Select-Object -First 1).AdapterRAM / 1GB"',
+          { encoding: 'utf8' },
+        ).trim();
+        const totalGB = Math.round(parseFloat(ps));
+        if (!(totalGB > 0)) return null;
+        return {
+          vendor: 'wmi',
+          totalMiB: totalGB * 1024,
+          usedMiB: null,
+          freeMiB: null,
+          totalGB,
+          usedGB: null,
+          freeGB: null,
+          processes: [],
+        };
+      } catch {
+        return null;
+      }
+    }
   }
+}
+
+function listGpuComputeApps() {
+  try {
+    const raw = execSync(
+      'nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader,nounits',
+      { encoding: 'utf8', timeout: 8000 },
+    ).trim();
+    if (!raw) return [];
+    return raw
+      .split('\n')
+      .map((line) => {
+        const cols = line.split(',').map((s) => s.trim());
+        if (cols.length < 2) return null;
+        const pid = cols[0];
+        const memRaw = cols[cols.length - 1];
+        const usedMiB = /^\d+$/.test(memRaw) ? parseInt(memRaw, 10) : null;
+        const pathName = cols.length > 2 ? cols.slice(1, -1).join(',') : cols[1];
+        const name = String(pathName || 'unknown').replace(/^.*[\\/]/, '');
+        if (!pid || /insufficient permissions/i.test(name)) {
+          return { pid, name: name || 'other', usedMiB };
+        }
+        return { pid, name, usedMiB };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Total VRAM in GB (card size). Prefer detectGpuMemory() when free/used matter. */
+function detectVRAM() {
+  return detectGpuMemory()?.totalGB ?? null;
+}
+
+function formatGpuProcessSummary(processes, { limit = 5 } = {}) {
+  if (!processes?.length) return '';
+  const names = [];
+  const seen = new Set();
+  for (const p of processes) {
+    let n = p.name || 'other';
+    if (/insufficient permissions/i.test(n) || n === 'other') {
+      n = p.pid ? `pid:${p.pid}` : 'unknown';
+    }
+    const key = n.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(n);
+    if (names.length >= limit) break;
+  }
+  return names.join(', ');
+}
+
+/** Print free vs total; warn when something else is sitting on the GPU. */
+function printGpuMemoryReport(gpu, { prefix = '🧠' } = {}) {
+  if (!gpu) {
+    console.log(
+      `${prefix} Could not auto-detect VRAM (tries NVIDIA nvidia-smi, AMD rocm-smi, then Windows WMI — Apple / some GPUs may need manual picks)`,
+    );
+    return;
+  }
+  if (gpu.freeGB != null && gpu.usedGB != null) {
+    console.log(`${prefix} GPU: ${gpu.totalGB}GB total · ~${gpu.freeGB}GB free · ~${gpu.usedGB}GB used`);
+  } else {
+    console.log(`${prefix} Detected: ${gpu.totalGB} GB VRAM — nice rig!`);
+  }
+  const procs = formatGpuProcessSummary(gpu.processes);
+  if (procs) console.log(`   GPU processes: ${procs}`);
+}
+
+/**
+ * True when free VRAM is low enough that Hermes/etc. may cause false OOMs.
+ * @returns {boolean} whether the user wants to continue
+ */
+async function warnIfLowFreeVram(gpu) {
+  if (!gpu || gpu.freeGB == null || gpu.totalGB == null) return true;
+  const freeRatio = gpu.freeGB / gpu.totalGB;
+  const busy = gpu.usedGB != null && gpu.usedGB >= 1.5 && (freeRatio < 0.55 || gpu.freeGB < 4);
+  if (!busy) return true;
+
+  const procs = formatGpuProcessSummary(gpu.processes) || 'unknown apps';
+  console.log(
+    `\n⚠️  Only ~${gpu.freeGB}GB free of ${gpu.totalGB}GB — other GPU users (${procs}) can make loads OOM.`,
+  );
+  console.log('   Close Hermes / ComfyUI / other GPU apps, or continue knowing fit estimates use free VRAM.\n');
+  const { cont } = await prompt([
+    {
+      type: 'confirm',
+      name: 'cont',
+      message: 'Continue with current free VRAM?',
+      initial: true,
+    },
+  ]);
+  return cont !== false;
+}
+
+/** Re-read free VRAM; log a one-liner if it changed a lot. */
+function refreshGpuMemory(prev) {
+  const next = detectGpuMemory();
+  if (!next || next.freeGB == null) return next || prev;
+  if (prev?.freeGB != null && Math.abs(next.freeGB - prev.freeGB) >= 0.5) {
+    console.log(`🧠 VRAM now: ~${next.freeGB}GB free / ${next.totalGB}GB total (~${next.usedGB}GB used)`);
+    const procs = formatGpuProcessSummary(next.processes);
+    if (procs) console.log(`   GPU processes: ${procs}`);
+  }
+  return next;
 }
 
 function readFinetunaState() {
@@ -615,31 +789,6 @@ process.on('SIGINT', () => {
   process.exit(130);
 });
 
-function detectVRAM() {
-  try {
-    const nvidia = execSync('nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits', { encoding: 'utf8' }).trim();
-    const mib = parseInt(nvidia, 10);
-    return Math.round(mib / 1024);
-  } catch (e) {
-    try {
-      const rocm = execSync('rocm-smi --showmeminfo vram', { encoding: 'utf8', timeout: 8000 });
-      const b = rocm.match(/VRAM Total Memory \(B\):\s*(\d+)/i);
-      if (b) return Math.max(1, Math.round(parseInt(b[1], 10) / (1024 * 1024 * 1024)));
-    } catch (eR) {
-      /* no ROCm */
-    }
-    try {
-      const ps = execSync('powershell -Command "(Get-CimInstance Win32_VideoController | Select-Object -First 1).AdapterRAM / 1GB"', {
-        encoding: 'utf8',
-      }).trim();
-      const gb = Math.round(parseFloat(ps));
-      return gb > 0 ? gb : null;
-    } catch (e2) {
-      return null;
-    }
-  }
-}
-
 const GiB = 1024 ** 3;
 
 /** Local model metadata from GET /api/tags (size, params, quant, capabilities). */
@@ -677,22 +826,29 @@ function isCloudModel(name, meta) {
 }
 
 /**
- * Soft fit hint vs detected VRAM using on-disk size (≈ weights) + param count + vision.
+ * Soft fit hint vs available VRAM (prefer free; fall back to total) using on-disk size ≈ weights.
  * Not a guarantee — GPU-fit after load is authoritative.
  * @returns {{ tier: 'ok'|'tight'|'wont_fit'|'cloud'|'unknown', sizeGB: number|null, paramsB: number|null, vision: boolean, hint: string }}
  */
-function classifyModelFit(name, meta, vramGB) {
+function classifyModelFit(name, meta, vramGB, { freeGB = null } = {}) {
   const sizeGB = meta?.size != null ? meta.size / GiB : null;
   const paramsB = parseParamBillions(meta, name);
   const caps = meta?.capabilities || [];
   const family = meta?.details?.family || meta?.details?.families?.[0] || '';
   const vision = caps.includes('vision') || /^gemma4$/i.test(family) || /gemma4/i.test(name);
   const quant = meta?.details?.quantization_level || '';
+  const availGB = freeGB != null && freeGB > 0 ? freeGB : vramGB;
+  const availLabel =
+    freeGB != null && vramGB != null && Math.abs(freeGB - vramGB) >= 0.5
+      ? `${freeGB}GB free`
+      : vramGB != null
+        ? `${vramGB}GB`
+        : null;
 
   if (isCloudModel(name, meta)) {
     return { tier: 'cloud', sizeGB, paramsB, vision, hint: 'cloud — not local GPU' };
   }
-  if (vramGB == null || vramGB < 1) {
+  if (availGB == null || availGB < 1) {
     const bits = [];
     if (sizeGB != null) bits.push(`~${sizeGB.toFixed(1)}GB`);
     if (paramsB != null) bits.push(`${paramsB}B`);
@@ -700,20 +856,20 @@ function classifyModelFit(name, meta, vramGB) {
     return { tier: 'unknown', sizeGB, paramsB, vision, hint: bits.join(' · ') };
   }
 
-  const ratio = sizeGB != null ? sizeGB / vramGB : null;
+  const ratio = sizeGB != null ? sizeGB / availGB : null;
   // Multimodal / projector models need more free VRAM than disk size alone suggests.
   const wontFit =
     (ratio != null && ratio > 1.05) ||
-    (paramsB != null && paramsB >= 14 && vramGB <= 12) ||
-    (paramsB != null && paramsB >= 12 && vramGB <= 8 && (vision || ratio == null || ratio > 0.75)) ||
+    (paramsB != null && paramsB >= 14 && availGB <= 12) ||
+    (paramsB != null && paramsB >= 12 && availGB <= 8 && (vision || ratio == null || ratio > 0.75)) ||
     (vision && ratio != null && ratio > 0.9);
 
   const tight =
     !wontFit &&
     ((ratio != null && ratio > 0.68) ||
       (vision && ratio != null && ratio > 0.5) ||
-      (paramsB != null && paramsB >= 12 && vramGB <= 10) ||
-      (paramsB != null && paramsB >= 9 && vision && vramGB <= 8 && ratio != null && ratio > 0.55));
+      (paramsB != null && paramsB >= 12 && availGB <= 10) ||
+      (paramsB != null && paramsB >= 9 && vision && availGB <= 8 && ratio != null && ratio > 0.55));
 
   const bits = [];
   if (sizeGB != null) bits.push(`~${sizeGB.toFixed(1)}GB`);
@@ -722,11 +878,11 @@ function classifyModelFit(name, meta, vramGB) {
   if (vision) bits.push('vision');
 
   if (wontFit) {
-    bits.push(`likely OOM on ${vramGB}GB`);
+    bits.push(`likely OOM on ${availLabel || availGB + 'GB'}`);
     return { tier: 'wont_fit', sizeGB, paramsB, vision, hint: bits.join(' · ') };
   }
   if (tight) {
-    bits.push(`tight on ${vramGB}GB`);
+    bits.push(`tight on ${availLabel || availGB + 'GB'}`);
     return { tier: 'tight', sizeGB, paramsB, vision, hint: bits.join(' · ') };
   }
   return { tier: 'ok', sizeGB, paramsB, vision, hint: bits.join(' · ') };
@@ -734,10 +890,10 @@ function classifyModelFit(name, meta, vramGB) {
 
 const FIT_TIER_ORDER = { ok: 0, unknown: 1, tight: 2, wont_fit: 3, cloud: 4 };
 
-function buildModelSelectChoices(modelNames, tagsByName, vramGB) {
+function buildModelSelectChoices(modelNames, tagsByName, vramGB, { freeGB = null } = {}) {
   const annotated = modelNames.map((name) => {
     const meta = tagsByName.get(name) || tagsByName.get(name.replace(/:latest$/, '')) || null;
-    const fit = classifyModelFit(name, meta, vramGB);
+    const fit = classifyModelFit(name, meta, vramGB, { freeGB });
     return { name, fit };
   });
 
@@ -1326,14 +1482,21 @@ async function main() {
     console.log('⚠️  --flash-attn set but no NVIDIA GPU name detected locally — setup tips still apply (remote Ollama may differ).\n');
   }
 
-  const vramGB = detectVRAM();
-  if (vramGB) console.log(`🧠 Detected: ${vramGB} GB VRAM — nice rig!`);
-  else
-    console.log(
-      '🧠 Could not auto-detect VRAM (tries NVIDIA nvidia-smi, AMD rocm-smi, then Windows WMI — Apple / some GPUs may need manual picks)',
-    );
+  let gpu = detectGpuMemory();
+  let vramGB = gpu?.totalGB ?? null;
+  let vramFreeGB = gpu?.freeGB ?? null;
+  printGpuMemoryReport(gpu);
   if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
   console.log('');
+
+  if (!(await warnIfLowFreeVram(gpu))) {
+    console.log('Aborting — free VRAM first (close Hermes / other GPU apps), then re-run.');
+    process.exit(0);
+  }
+  // Re-read after the confirm pause in case the user freed memory.
+  gpu = refreshGpuMemory(gpu);
+  vramGB = gpu?.totalGB ?? vramGB;
+  vramFreeGB = gpu?.freeGB ?? vramFreeGB;
 
   // Fetch models
   let models = [];
@@ -1367,13 +1530,17 @@ async function main() {
   let tagsByName = new Map();
   try {
     tagsByName = await fetchOllamaTagsByName();
-    const built = buildModelSelectChoices(models, tagsByName, vramGB);
+    const built = buildModelSelectChoices(models, tagsByName, vramGB, { freeGB: vramFreeGB });
     modelChoices = built.choices;
     const flagged = built.annotated.filter((a) => a.fit.tier === 'tight' || a.fit.tier === 'wont_fit' || a.fit.tier === 'cloud');
     console.log(`Found ${models.length} model(s).`);
     if (vramGB != null && flagged.length) {
+      const vs =
+        vramFreeGB != null && Math.abs(vramFreeGB - vramGB) >= 0.5
+          ? `~${vramFreeGB}GB free (of ${vramGB}GB)`
+          : `~${vramGB}GB VRAM`;
       console.log(
-        `Grouped by fit vs ~${vramGB}GB VRAM (on-disk size ≈ weights; vision needs more). Still selectable — GPU-fit is authoritative.\n`,
+        `Grouped by fit vs ${vs} (on-disk size ≈ weights; vision needs more). Still selectable — GPU-fit is authoritative.\n`,
       );
     } else {
       console.log('');
@@ -1397,14 +1564,17 @@ async function main() {
     sourceModel,
     tagsByName.get(sourceModel) || tagsByName.get(sourceModel.replace(/:latest$/, '')) || null,
     vramGB,
+    { freeGB: vramFreeGB },
   );
   if (sourceFit.tier === 'wont_fit') {
-    console.log(`\n⚠️  ${sourceModel} looks too large for ~${vramGB}GB (${sourceFit.hint}).`);
-    console.log('   You can continue, but expect load OOM — prefer a smaller sibling if you have one.\n');
+    console.log(`\n⚠️  ${sourceModel} looks too large for ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}).`);
+    console.log('   You can continue, but expect load OOM — free VRAM or pick a smaller sibling.\n');
   } else if (sourceFit.tier === 'cloud') {
     console.log(`\n⚠️  ${sourceModel} looks like a cloud/remote model — local GPU tuning may not apply.\n`);
   } else if (sourceFit.tier === 'tight') {
-    console.log(`\n· ${sourceModel} is tight on ~${vramGB}GB (${sourceFit.hint}) — start with modest num_ctx.\n`);
+    console.log(
+      `\n· ${sourceModel} is tight on ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}) — start with modest num_ctx.\n`,
+    );
   }
 
   const { newName: rawNewName } = await prompt([
@@ -1507,7 +1677,9 @@ async function main() {
   }
 
   const vramComment = vramGB
-    ? `Tuned with ~${vramGB}GB VRAM detected (validate with GPU-fit)`
+    ? vramFreeGB != null
+      ? `Tuned with ~${vramGB}GB VRAM (~${vramFreeGB}GB free at create; validate with GPU-fit)`
+      : `Tuned with ~${vramGB}GB VRAM detected (validate with GPU-fit)`
     : 'Tuned for your GPU (VRAM not auto-detected)';
   const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn: sessionFlashAttn });
 
@@ -1525,6 +1697,18 @@ async function main() {
   let bestBatch = null;
   let beforeMetrics = null;
   let afterMetrics = null;
+
+  gpu = refreshGpuMemory(gpu);
+  vramGB = gpu?.totalGB ?? vramGB;
+  vramFreeGB = gpu?.freeGB ?? vramFreeGB;
+  if (gpu?.freeGB != null) {
+    console.log(`\n🧠 Before load: ~${gpu.freeGB}GB free / ${gpu.totalGB}GB total`);
+    const procs = formatGpuProcessSummary(gpu.processes);
+    if (procs) console.log(`   GPU processes: ${procs}`);
+    if (gpu.usedGB != null && gpu.usedGB >= 1.5 && gpu.freeGB < 4) {
+      console.log('   ⚠️  Free VRAM is low — Hermes or other apps may cause OOM on load.');
+    }
+  }
 
   console.log('\n📏 Baseline speed (before auto-tune)...');
   beforeMetrics = await collectComparisonMetrics(newName);
