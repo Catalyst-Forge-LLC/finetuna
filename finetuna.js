@@ -7,15 +7,18 @@ import path from 'path';
 const require = createRequire(import.meta.url);
 const colors = require('ansi-colors');
 
-// High-contrast Enquirer palette (default cyan.dim placeholders are nearly invisible on dark terminals)
+// High-contrast Enquirer palette for dark terminals.
+// NOTE: `primary` must be a base ansi-colors name (cyan/white/…), not *Bright —
+// Enquirer's cursor uses inverse(primary) → bgX.black, and *Bright names yield
+// noop + black text (invisible on dark backgrounds).
 const enquirer = new Enquirer({
   styles: {
-    primary: colors.whiteBright.bold,
-    answered: colors.cyanBright,
-    placeholder: colors.whiteBright,
+    primary: colors.cyan.bold,
+    answered: colors.cyan.bold,
+    placeholder: colors.white,
     muted: colors.white,
-    info: colors.cyanBright,
-    pending: colors.whiteBright.bold,
+    info: colors.cyan.bold,
+    pending: colors.cyan.bold,
     dark: colors.gray,
     disabled: colors.gray,
   },
