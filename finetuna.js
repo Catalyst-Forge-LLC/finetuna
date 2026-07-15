@@ -23,7 +23,24 @@ const enquirer = new Enquirer({
     disabled: colors.gray,
   },
 });
-const prompt = (questions) => enquirer.prompt(questions);
+
+/** Enquirer confirm renders the cast boolean as "true"/"false" — show Yes/No instead. */
+function withConfirmFormat(question) {
+  if (!question || question.type !== 'confirm' || question.format) return question;
+  return {
+    ...question,
+    format(value) {
+      const yes = value === true || /^[ty1]/i.test(String(value));
+      if (!this.state.submitted) return this.styles.primary(yes ? 'Yes' : 'No');
+      return this.styles.success(yes ? 'Yes' : 'No');
+    },
+  };
+}
+
+const prompt = (questions) => {
+  const list = (Array.isArray(questions) ? questions : [questions]).map(withConfirmFormat);
+  return enquirer.prompt(list);
+};
 
 // https://grok.com/share/bGVnYWN5_c4d382dd-9452-4610-bff8-3cdbe9a4fb5d
 
