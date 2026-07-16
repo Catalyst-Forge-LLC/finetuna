@@ -324,14 +324,24 @@ function printOomBrief(errMsg) {
  * Short diagnosis only — no bullet lists.
  * @returns {'wont_fit'|'kv'|'compute'|'oom'}
  */
-function printOomGuidance({ sourceModel, vramGB, numCtx, errMsg, sameAllocAsBefore }) {
+function printOomGuidance({ sourceModel, vramGB, numCtx, errMsg, sameAllocAsBefore, unified = false }) {
   const kind = classifyLoadOom(errMsg, { numCtx, sameAllocAsBefore });
-  const vram = vramGB ? `~${vramGB}GB VRAM` : 'this GPU';
+  const vram = vramGB
+    ? unified
+      ? `~${vramGB}GB unified memory`
+      : `~${vramGB}GB VRAM`
+    : unified
+      ? 'this Mac'
+      : 'this GPU';
   const detail = printOomBrief(errMsg);
 
   if (kind === 'wont_fit') {
     console.log(`\n💥 ${sourceModel} won't fit ${vram} (OOM at num_ctx=${numCtx}: ${detail}).`);
-    console.log('   Lowering context will not help. Use a smaller model/quant, free other GPU apps (Hermes), or restart Ollama.');
+    console.log(
+      unified
+        ? '   Lowering context may not help. Use a smaller model/quant, or free RAM (quit heavy apps) and retry.'
+        : '   Lowering context will not help. Use a smaller model/quant, free other GPU apps (Hermes), or restart Ollama.',
+    );
     return kind;
   }
   if (kind === 'kv') {
@@ -378,6 +388,8 @@ async function freeGpuVram() {
 }
 
 function detectFlashAttnSupport() {
+  // CUDA flash-attn tips are NVIDIA-oriented; Apple Silicon uses Metal/MLX instead.
+  if (process.platform === 'darwin') return false;
   try {
     const names = execSync('nvidia-smi --query-gpu=name --format=csv,noheader', { encoding: 'utf8' })
       .trim()
@@ -456,11 +468,16 @@ function queryGpuMemUsedMiB() {
 }
 
 /**
- * Total / used / free VRAM + compute-app names (NVIDIA).
- * Free matters when other apps (chat UIs, browsers, etc.) already hold the card.
- * @returns {{ vendor: string, totalMiB: number, usedMiB: number|null, freeMiB: number|null, totalGB: number, usedGB: number|null, freeGB: number|null, processes: {pid:string,name:string,usedMiB:number|null}[] } | null}
+ * Total / used / free GPU memory.
+ * NVIDIA discrete VRAM, AMD, Windows WMI, or Apple Silicon unified memory.
+ * @returns {{ vendor: string, totalMiB: number, usedMiB: number|null, freeMiB: number|null, totalGB: number, usedGB: number|null, freeGB: number|null, processes: {pid:string,name:string,usedMiB:number|null}[], unified?: boolean, chip?: string } | null}
  */
 function detectGpuMemory() {
+  if (process.platform === 'darwin') {
+    const apple = detectAppleSiliconMemory();
+    if (apple) return apple;
+  }
+
   try {
     const raw = execSync(
       'nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits',
@@ -482,6 +499,7 @@ function detectGpuMemory() {
       usedGB: usedMiB != null ? Math.round((usedMiB / 1024) * 10) / 10 : null,
       freeGB: freeMiB != null ? Math.round((freeMiB / 1024) * 10) / 10 : null,
       processes: listGpuComputeApps(),
+      unified: false,
     };
   } catch {
     try {
@@ -501,6 +519,7 @@ function detectGpuMemory() {
         usedGB: usedMiB != null ? Math.round((usedMiB / 1024) * 10) / 10 : null,
         freeGB: freeMiB != null ? Math.round((freeMiB / 1024) * 10) / 10 : null,
         processes: [],
+        unified: false,
       };
     } catch {
       try {
@@ -519,11 +538,61 @@ function detectGpuMemory() {
           usedGB: null,
           freeGB: null,
           processes: [],
+          unified: false,
         };
       } catch {
         return null;
       }
     }
+  }
+}
+
+/** Apple Silicon: one unified memory pool for CPU + GPU (Metal / MLX). */
+function detectAppleSiliconMemory() {
+  if (process.platform !== 'darwin') return null;
+  try {
+    const brand = execSync('sysctl -n machdep.cpu.brand_string', { encoding: 'utf8', timeout: 5000 }).trim();
+    const memBytes = parseInt(execSync('sysctl -n hw.memsize', { encoding: 'utf8', timeout: 5000 }).trim(), 10);
+    const appleChip = /Apple|M\d/i.test(brand) || process.arch === 'arm64';
+    if (!appleChip || !Number.isFinite(memBytes) || memBytes < 1) return null;
+
+    let freeGB = null;
+    let usedGB = null;
+    try {
+      const pageSize = parseInt(execSync('pagesize', { encoding: 'utf8', timeout: 3000 }).trim(), 10) || 16384;
+      const vm = execSync('vm_stat', { encoding: 'utf8', timeout: 5000 });
+      const n = (re) => {
+        const m = vm.match(re);
+        return m ? parseInt(m[1].replace(/\./g, ''), 10) : 0;
+      };
+      // Rough "available" — free + speculative + inactive + purgeable (not wired).
+      const availPages =
+        n(/Pages free:\s+([\d.]+)/i) +
+        n(/Pages speculative:\s+([\d.]+)/i) +
+        n(/Pages inactive:\s+([\d.]+)/i) +
+        n(/Pages purgeable:\s+([\d.]+)/i);
+      freeGB = Math.round(((availPages * pageSize) / (1024 ** 3)) * 10) / 10;
+      usedGB = Math.round((memBytes / (1024 ** 3) - freeGB) * 10) / 10;
+      if (usedGB < 0) usedGB = 0;
+    } catch {
+      /* total only */
+    }
+
+    const totalGB = Math.max(1, Math.round(memBytes / (1024 ** 3)));
+    return {
+      vendor: 'apple',
+      chip: brand,
+      totalMiB: Math.round(memBytes / (1024 * 1024)),
+      usedMiB: usedGB != null ? Math.round(usedGB * 1024) : null,
+      freeMiB: freeGB != null ? Math.round(freeGB * 1024) : null,
+      totalGB,
+      usedGB,
+      freeGB,
+      processes: [],
+      unified: true,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -555,9 +624,17 @@ function listGpuComputeApps() {
   }
 }
 
-/** Total VRAM in GB (card size). Prefer detectGpuMemory() when free/used matter. */
+/** Total memory in GB (VRAM or unified). Prefer detectGpuMemory() when free/used matter. */
 function detectVRAM() {
   return detectGpuMemory()?.totalGB ?? null;
+}
+
+function memoryPoolLabel(gpu) {
+  return gpu?.unified ? 'unified memory' : 'VRAM';
+}
+
+function gpuFitLabel(gpu) {
+  return gpu?.unified ? 'Metal / GPU' : '100% GPU';
 }
 
 function formatGpuProcessSummary(processes, { limit = 5 } = {}) {
@@ -582,8 +659,25 @@ function formatGpuProcessSummary(processes, { limit = 5 } = {}) {
 function printGpuMemoryReport(gpu, { prefix = '🧠' } = {}) {
   if (!gpu) {
     console.log(
-      `${prefix} Could not auto-detect VRAM (tries NVIDIA nvidia-smi, AMD rocm-smi, then Windows WMI — Apple / some GPUs may need manual picks)`,
+      `${prefix} Could not auto-detect memory (NVIDIA nvidia-smi, AMD rocm-smi, Apple sysctl, or Windows WMI)`,
     );
+    return;
+  }
+  if (gpu.unified) {
+    const chip = gpu.chip ? ` · ${gpu.chip}` : '';
+    if (gpu.freeGB != null && gpu.usedGB != null) {
+      console.log(
+        `${prefix} Apple Silicon${chip}: ${gpu.totalGB}GB unified memory · ~${gpu.freeGB}GB available · ~${gpu.usedGB}GB in use`,
+      );
+    } else {
+      console.log(`${prefix} Apple Silicon${chip}: ${gpu.totalGB}GB unified memory (CPU+GPU share one pool)`);
+    }
+    console.log('   Metal/MLX uses the same RAM as apps — leave headroom for macOS (fit estimates use available memory).');
+    if (gpu.totalGB >= 32) {
+      console.log('   Tip: Ollama’s MLX backend (Apple Silicon preview) prefers ≥32GB; keep Ollama updated for Metal/MLX models.');
+    } else {
+      console.log('   Tip: smaller quants + modest num_ctx work best under 32GB unified; Ollama still uses Metal.');
+    }
     return;
   }
   if (gpu.freeGB != null && gpu.usedGB != null) {
@@ -596,37 +690,46 @@ function printGpuMemoryReport(gpu, { prefix = '🧠' } = {}) {
 }
 
 /**
- * True when free VRAM is low enough that Hermes/etc. may cause false OOMs.
+ * True when free memory is low enough that other apps may cause false OOMs.
  * @returns {boolean} whether the user wants to continue
  */
 async function warnIfLowFreeVram(gpu) {
   if (!gpu || gpu.freeGB == null || gpu.totalGB == null) return true;
   const freeRatio = gpu.freeGB / gpu.totalGB;
-  const busy = gpu.usedGB != null && gpu.usedGB >= 1.5 && (freeRatio < 0.55 || gpu.freeGB < 4);
+  // Unified memory always shares with the OS — warn a bit earlier.
+  const threshold = gpu.unified ? 0.4 : 0.55;
+  const minFree = gpu.unified ? 6 : 4;
+  const busy = gpu.usedGB != null && gpu.usedGB >= 1.5 && (freeRatio < threshold || gpu.freeGB < minFree);
   if (!busy) return true;
 
-  const procs = formatGpuProcessSummary(gpu.processes) || 'unknown apps';
+  const pool = memoryPoolLabel(gpu);
+  const procs = formatGpuProcessSummary(gpu.processes);
   console.log(
-    `\n⚠️  Only ~${gpu.freeGB}GB free of ${gpu.totalGB}GB — other GPU users (${procs}) can make loads OOM.`,
+    `\n⚠️  Only ~${gpu.freeGB}GB available of ${gpu.totalGB}GB ${pool}${procs ? ` (${procs})` : ''}.`,
   );
-  console.log('   Close other GPU apps (or Hermes), or continue knowing fit estimates use free VRAM.\n');
+  console.log(
+    gpu.unified
+      ? '   Quit heavy apps (browsers, IDEs, other local models) so Metal has headroom, or continue with current availability.\n'
+      : '   Close other GPU apps (or Hermes), or continue knowing fit estimates use free VRAM.\n',
+  );
   const { cont } = await prompt([
     {
       type: 'confirm',
       name: 'cont',
-      message: 'Continue with current free VRAM?',
+      message: `Continue with current free ${pool}?`,
       initial: true,
     },
   ]);
   return cont !== false;
 }
 
-/** Re-read free VRAM; log a one-liner if it changed a lot. */
+/** Re-read free memory; log a one-liner if it changed a lot. */
 function refreshGpuMemory(prev) {
   const next = detectGpuMemory();
   if (!next || next.freeGB == null) return next || prev;
   if (prev?.freeGB != null && Math.abs(next.freeGB - prev.freeGB) >= 0.5) {
-    console.log(`🧠 VRAM now: ~${next.freeGB}GB free / ${next.totalGB}GB total (~${next.usedGB}GB used)`);
+    const pool = memoryPoolLabel(next);
+    console.log(`🧠 Now: ~${next.freeGB}GB available / ${next.totalGB}GB ${pool} (~${next.usedGB}GB in use)`);
     const procs = formatGpuProcessSummary(next.processes);
     if (procs) console.log(`   GPU processes: ${procs}`);
   }
@@ -830,20 +933,29 @@ function isCloudModel(name, meta) {
  * Not a guarantee — GPU-fit after load is authoritative.
  * @returns {{ tier: 'ok'|'tight'|'wont_fit'|'cloud'|'unknown', sizeGB: number|null, paramsB: number|null, vision: boolean, hint: string }}
  */
-function classifyModelFit(name, meta, vramGB, { freeGB = null } = {}) {
+function classifyModelFit(name, meta, vramGB, { freeGB = null, unified = false } = {}) {
   const sizeGB = meta?.size != null ? meta.size / GiB : null;
   const paramsB = parseParamBillions(meta, name);
   const caps = meta?.capabilities || [];
   const family = meta?.details?.family || meta?.details?.families?.[0] || '';
   const vision = caps.includes('vision') || /^gemma4$/i.test(family) || /gemma4/i.test(name);
   const quant = meta?.details?.quantization_level || '';
-  const availGB = freeGB != null && freeGB > 0 ? freeGB : vramGB;
+  // Unified memory is shared with macOS — if free is unknown, budget ~75% of total.
+  const availGB =
+    freeGB != null && freeGB > 0
+      ? freeGB
+      : unified && vramGB != null
+        ? Math.max(4, Math.round(vramGB * 0.75 * 10) / 10)
+        : vramGB;
+  const pool = unified ? 'unified' : null;
   const availLabel =
     freeGB != null && vramGB != null && Math.abs(freeGB - vramGB) >= 0.5
-      ? `${freeGB}GB free`
-      : vramGB != null
-        ? `${vramGB}GB`
-        : null;
+      ? `${freeGB}GB available`
+      : pool && availGB != null && vramGB != null && availGB < vramGB
+        ? `~${availGB}GB usable of ${vramGB}GB unified`
+        : vramGB != null
+          ? `${vramGB}GB`
+          : null;
 
   if (isCloudModel(name, meta)) {
     return { tier: 'cloud', sizeGB, paramsB, vision, hint: 'cloud — not local GPU' };
@@ -890,10 +1002,10 @@ function classifyModelFit(name, meta, vramGB, { freeGB = null } = {}) {
 
 const FIT_TIER_ORDER = { ok: 0, unknown: 1, tight: 2, wont_fit: 3, cloud: 4 };
 
-function buildModelSelectChoices(modelNames, tagsByName, vramGB, { freeGB = null } = {}) {
+function buildModelSelectChoices(modelNames, tagsByName, vramGB, { freeGB = null, unified = false } = {}) {
   const annotated = modelNames.map((name) => {
     const meta = tagsByName.get(name) || tagsByName.get(name.replace(/:latest$/, '')) || null;
-    const fit = classifyModelFit(name, meta, vramGB, { freeGB });
+    const fit = classifyModelFit(name, meta, vramGB, { freeGB, unified });
     return { name, fit };
   });
 
@@ -955,6 +1067,8 @@ function maxSuggestedCtxFromVram(vramGB) {
   if (vramGB <= 6) return 49152;
   if (vramGB <= 8) return 65536;
   if (vramGB <= 12) return 98304;
+  if (vramGB <= 24) return 131072;
+  // Large unified-memory Macs (32GB+) — 128K is a reasonable soft ceiling in the picker
   return 131072;
 }
 
@@ -1046,8 +1160,8 @@ PARAMETER num_batch ${numBatch}
 `;
 }
 
-async function checkGPUFit(newName) {
-  console.log('\n🔍 Testing GPU fit... 🐟');
+async function checkGPUFit(newName, { unified = false } = {}) {
+  console.log(`\n🔍 Testing ${unified ? 'Metal / GPU' : 'GPU'} fit... 🐟`);
 
   // Unload any previously loaded version so ollama ps reflects the NEW model config
   try {
@@ -1105,28 +1219,57 @@ async function checkGPUFit(newName) {
   }
 
   const lines = psOutput.trim().split('\n');
-  let isFullGPU = false;
   let processorInfo = 'unknown';
+  let gpuPct = null;
+  let cpuPct = null;
 
   for (let i = 1; i < lines.length; i++) {
     const rowName = lines[i].trim().split(/\s+/)[0];
     if (rowName === newName || rowName === newName + ':latest') {
-      const match = lines[i].match(/(\d+%\/\d+% CPU\/GPU|100% GPU)/);
-      processorInfo = match ? match[0] : 'unknown';
-      isFullGPU = processorInfo.includes('100% GPU');
+      const split = lines[i].match(/(\d+)%\/(\d+)%\s*CPU\/GPU/i);
+      const full = lines[i].match(/100%\s*GPU/i);
+      const metal = lines[i].match(/\bMetal\b/i);
+      if (full) {
+        processorInfo = '100% GPU';
+        gpuPct = 100;
+        cpuPct = 0;
+      } else if (split) {
+        cpuPct = parseInt(split[1], 10);
+        gpuPct = parseInt(split[2], 10);
+        processorInfo = `${cpuPct}%/${gpuPct}% CPU/GPU`;
+      } else if (metal) {
+        processorInfo = 'Metal';
+        gpuPct = 100;
+      } else {
+        const anyGpu = lines[i].match(/(\d+)%\s*GPU/i);
+        if (anyGpu) {
+          gpuPct = parseInt(anyGpu[1], 10);
+          processorInfo = `${gpuPct}% GPU`;
+        }
+      }
       break;
     }
   }
 
-  if (isFullGPU) {
-    console.log("✅ Perfect! Model is fully on GPU (100% GPU) — it's hooked! 🐟");
+  // Discrete NVIDIA: require 100% GPU. Apple unified memory: Metal / mostly-GPU / unclear ps is OK.
+  let ok = processorInfo === '100% GPU' || processorInfo === 'Metal' || (gpuPct != null && gpuPct >= 100);
+  if (!ok && unified) {
+    if (gpuPct != null && gpuPct >= 50) ok = true;
+    else if (processorInfo === 'unknown') ok = true;
+  }
+
+  if (processorInfo === '100% GPU' || processorInfo === 'Metal') {
+    console.log(`✅ Perfect! Model is on ${processorInfo === 'Metal' ? 'Metal' : 'GPU'} — it's hooked! 🐟`);
+  } else if (ok && unified) {
+    console.log(
+      `✅ Loaded on Apple Silicon (${processorInfo}) — unified memory, treating as GPU-fit OK.`,
+    );
   } else if (processorInfo === 'unknown') {
     console.log('⚠️  Could not confirm GPU offload from ollama ps (processor column unknown) — not treating as a hard fail.');
   } else {
     console.log(`⚠️  Not fully on GPU → ${processorInfo}`);
   }
-  // unknown ≠ proven CPU spill; callers should treat false as "not confirmed 100%"
-  return isFullGPU;
+  return ok;
 }
 
 async function runTestPromptWithSpeed(newName) {
@@ -1480,23 +1623,32 @@ async function main() {
     console.log('NVIDIA GPU detected — flash attention is a server setting (OLLAMA_FLASH_ATTENTION), not Modelfile.\n');
   } else if (FLAGS.flashAttn === true) {
     console.log('⚠️  --flash-attn set but no NVIDIA GPU name detected locally — setup tips still apply (remote Ollama may differ).\n');
+  } else if (process.platform === 'darwin') {
+    console.log('🍎 macOS: skipping CUDA flash-attn prompts — Ollama uses Metal (and MLX on supported setups).\n');
   }
 
   let gpu = detectGpuMemory();
   let vramGB = gpu?.totalGB ?? null;
   let vramFreeGB = gpu?.freeGB ?? null;
+  let isUnified = Boolean(gpu?.unified);
   printGpuMemoryReport(gpu);
   if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
   console.log('');
 
   if (!(await warnIfLowFreeVram(gpu))) {
-    console.log('Aborting — free VRAM first (close Hermes / other GPU apps), then re-run.');
+    console.log(
+      isUnified
+        ? 'Aborting — free unified memory first (quit heavy apps), then re-run.'
+        : 'Aborting — free VRAM first (close Hermes / other GPU apps), then re-run.',
+    );
     process.exit(0);
   }
   // Re-read after the confirm pause in case the user freed memory.
   gpu = refreshGpuMemory(gpu);
   vramGB = gpu?.totalGB ?? vramGB;
   vramFreeGB = gpu?.freeGB ?? vramFreeGB;
+  isUnified = Boolean(gpu?.unified);
+  const fitLabel = gpuFitLabel(gpu);
 
   // Fetch models
   let models = [];
@@ -1530,15 +1682,15 @@ async function main() {
   let tagsByName = new Map();
   try {
     tagsByName = await fetchOllamaTagsByName();
-    const built = buildModelSelectChoices(models, tagsByName, vramGB, { freeGB: vramFreeGB });
+    const built = buildModelSelectChoices(models, tagsByName, vramGB, { freeGB: vramFreeGB, unified: isUnified });
     modelChoices = built.choices;
     const flagged = built.annotated.filter((a) => a.fit.tier === 'tight' || a.fit.tier === 'wont_fit' || a.fit.tier === 'cloud');
     console.log(`Found ${models.length} model(s).`);
     if (vramGB != null && flagged.length) {
       const vs =
         vramFreeGB != null && Math.abs(vramFreeGB - vramGB) >= 0.5
-          ? `~${vramFreeGB}GB free (of ${vramGB}GB)`
-          : `~${vramGB}GB VRAM`;
+          ? `~${vramFreeGB}GB available (of ${vramGB}GB ${isUnified ? 'unified' : 'VRAM'})`
+          : `~${vramGB}GB ${isUnified ? 'unified memory' : 'VRAM'}`;
       console.log(
         `Grouped by fit vs ${vs} (on-disk size ≈ weights; vision needs more). Still selectable — GPU-fit is authoritative.\n`,
       );
@@ -1564,11 +1716,15 @@ async function main() {
     sourceModel,
     tagsByName.get(sourceModel) || tagsByName.get(sourceModel.replace(/:latest$/, '')) || null,
     vramGB,
-    { freeGB: vramFreeGB },
+    { freeGB: vramFreeGB, unified: isUnified },
   );
   if (sourceFit.tier === 'wont_fit') {
     console.log(`\n⚠️  ${sourceModel} looks too large for ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}).`);
-    console.log('   You can continue, but expect load OOM — free VRAM or pick a smaller sibling.\n');
+    console.log(
+      isUnified
+        ? '   You can continue, but expect pressure/OOM — free RAM or pick a smaller sibling.\n'
+        : '   You can continue, but expect load OOM — free VRAM or pick a smaller sibling.\n',
+    );
   } else if (sourceFit.tier === 'cloud') {
     console.log(`\n⚠️  ${sourceModel} looks like a cloud/remote model — local GPU tuning may not apply.\n`);
   } else if (sourceFit.tier === 'tight') {
@@ -1677,10 +1833,14 @@ async function main() {
   }
 
   const vramComment = vramGB
-    ? vramFreeGB != null
-      ? `Tuned with ~${vramGB}GB VRAM (~${vramFreeGB}GB free at create; validate with GPU-fit)`
-      : `Tuned with ~${vramGB}GB VRAM detected (validate with GPU-fit)`
-    : 'Tuned for your GPU (VRAM not auto-detected)';
+    ? isUnified
+      ? vramFreeGB != null
+        ? `Tuned on Apple Silicon ~${vramGB}GB unified (~${vramFreeGB}GB available; Metal/MLX)`
+        : `Tuned on Apple Silicon ~${vramGB}GB unified memory (Metal/MLX)`
+      : vramFreeGB != null
+        ? `Tuned with ~${vramGB}GB VRAM (~${vramFreeGB}GB free at create; validate with GPU-fit)`
+        : `Tuned with ~${vramGB}GB VRAM detected (validate with GPU-fit)`
+    : 'Tuned for your GPU (memory not auto-detected)';
   const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn: sessionFlashAttn });
 
   const modelfilePath = path.join(process.cwd(), 'Modelfile-finetuna');
@@ -1702,11 +1862,16 @@ async function main() {
   vramGB = gpu?.totalGB ?? vramGB;
   vramFreeGB = gpu?.freeGB ?? vramFreeGB;
   if (gpu?.freeGB != null) {
-    console.log(`\n🧠 Before load: ~${gpu.freeGB}GB free / ${gpu.totalGB}GB total`);
+    const pool = memoryPoolLabel(gpu);
+    console.log(`\n🧠 Before load: ~${gpu.freeGB}GB available / ${gpu.totalGB}GB ${pool}`);
     const procs = formatGpuProcessSummary(gpu.processes);
     if (procs) console.log(`   GPU processes: ${procs}`);
-    if (gpu.usedGB != null && gpu.usedGB >= 1.5 && gpu.freeGB < 4) {
-      console.log('   ⚠️  Free VRAM is low — Hermes or other apps may cause OOM on load.');
+    if (gpu.usedGB != null && gpu.usedGB >= 1.5 && gpu.freeGB < (isUnified ? 6 : 4)) {
+      console.log(
+        isUnified
+          ? '   ⚠️  Available unified memory is low — quit heavy apps before load.'
+          : '   ⚠️  Free VRAM is low — Hermes or other apps may cause OOM on load.',
+      );
     }
   }
 
@@ -1727,6 +1892,7 @@ async function main() {
         numCtx: currentCtx,
         errMsg: beforeMetrics.errMsg,
         sameAllocAsBefore: false,
+        unified: isUnified,
       });
       await freeGpuVram();
       let lastAlloc = extractCudaAllocBytes(beforeMetrics.errMsg);
@@ -1742,6 +1908,7 @@ async function main() {
             numCtx: currentCtx,
             errMsg: beforeMetrics.errMsg,
             sameAllocAsBefore: true,
+            unified: isUnified,
           });
           break;
         }
@@ -1811,6 +1978,7 @@ async function main() {
             numCtx: currentCtx,
             errMsg: beforeMetrics.errMsg,
             sameAllocAsBefore: sameAlloc,
+            unified: isUnified,
           });
           if (alloc != null) lastAlloc = alloc;
           continue;
@@ -1831,7 +1999,7 @@ async function main() {
       {
         type: 'confirm',
         name: 'autoTune',
-        message: 'Would you like to auto-tune for maximum speed while staying 100% on GPU? 🐟',
+        message: `Would you like to auto-tune for maximum speed while staying on ${fitLabel}? 🐟`,
         initial: false,
       },
     ]);
@@ -1885,9 +2053,9 @@ async function main() {
           continue;
         }
 
-        const gpuOk = await checkGPUFit(newName);
+        const gpuOk = await checkGPUFit(newName, { unified: isUnified });
         if (!gpuOk) {
-          console.log(`   ⚠️  num_batch=${cand} not confirmed 100% GPU — skipping`);
+          console.log(`   ⚠️  num_batch=${cand} not confirmed ${fitLabel} — skipping`);
           batchResults.push({ cand, avg: 0, gpu: false });
           continue;
         }
@@ -1929,7 +2097,7 @@ async function main() {
       console.log('  Phase 2: num_ctx sweep (generation TPS + GPU fit)');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('  num_ctx is the biggest lever for generation speed.');
-      console.log("  Testing context sizes — skipping any that won't fit 100% GPU.\n");
+      console.log(`  Testing context sizes — skipping any that won't fit ${fitLabel}.\n`);
 
       const { ctxGoal } = await prompt([
         {
@@ -1937,8 +2105,8 @@ async function main() {
           name: 'ctxGoal',
           message: 'What do you want to optimize for? 🐟',
           choices: [
-            { name: 'max-context', message: 'Max context  — largest window that still fits 100% GPU' },
-            { name: 'max-speed', message: 'Max speed    — fastest generation TPS at 100% GPU' },
+            { name: 'max-context', message: `Max context  — largest window that still fits ${fitLabel}` },
+            { name: 'max-speed', message: `Max speed    — fastest generation TPS at ${fitLabel}` },
           ],
         },
       ]);
@@ -1947,11 +2115,14 @@ async function main() {
       const plan = buildCtxSweepPlan(currentCtx, { openClaw: FLAGS.openClaw });
       const preview = [plan.current, ...plan.lowerDesc, ...plan.higherAsc];
 
-      console.log('   Strategy:   ' + (ctxGoal === 'max-context' ? 'Largest context that fits 100% GPU' : 'Fastest generation speed at 100% GPU'));
+      console.log(
+        '   Strategy:   ' +
+          (ctxGoal === 'max-context' ? `Largest context that fits ${fitLabel}` : `Fastest generation speed at ${fitLabel}`),
+      );
       console.log(`   Pivot:      ${plan.current} (test current first; step down only if it fails; then probe up)`);
       console.log('   Candidates: ' + preview.join(', '));
       console.log('   Repeats: ' + repeatCount);
-      console.log('   Only candidates with 100% GPU offload will be kept.\n');
+      console.log(`   Only candidates with ${fitLabel} offload will be kept.\n`);
 
       async function tryCtxCandidate(cand) {
         console.log(`\n🐟 num_ctx = ${cand}${cand === currentCtx ? ' (current)' : ''}`);
@@ -1970,9 +2141,9 @@ async function main() {
           ctxResults.push({ cand, avg: 0, gpu: false });
           return { ok: false, createFailed: true };
         }
-        const gpuOk = await checkGPUFit(newName);
+        const gpuOk = await checkGPUFit(newName, { unified: isUnified });
         if (!gpuOk) {
-          console.log(`   ⚠️  num_ctx=${cand} not confirmed 100% GPU`);
+          console.log(`   ⚠️  num_ctx=${cand} not confirmed ${fitLabel}`);
           ctxResults.push({ cand, avg: 0, gpu: false });
           return { ok: false, gpuMiss: true };
         }
@@ -2075,9 +2246,9 @@ async function main() {
       if (bestCtxEntry) {
         bestCtx = bestCtxEntry.cand;
         if (ctxGoal === 'max-context') {
-          console.log(`\n   ✅ Largest 100% GPU context: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
+          console.log(`\n   ✅ Largest ${fitLabel} context: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
         } else {
-          console.log(`\n   ✅ Fastest at 100% GPU: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
+          console.log(`\n   ✅ Fastest at ${fitLabel}: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
         }
       } else {
         const gpuOnly = [...ctxResults].filter((r) => r.gpu).sort((a, b) => b.cand - a.cand)[0];
@@ -2085,7 +2256,7 @@ async function main() {
           bestCtx = gpuOnly.cand;
           console.log(`\n   ⚠️  Benchmarks failed; using largest GPU-fitting context (${bestCtx}) without TPS data.`);
         } else {
-          console.log('\n   ⚠️  No contexts fit 100% GPU — keeping original.');
+          console.log(`\n   ⚠️  No contexts fit ${fitLabel} — keeping original.`);
           bestCtx = currentCtx;
         }
       }
@@ -2205,7 +2376,7 @@ async function main() {
       await runTestPromptWithSpeed(newName);
       measuredSinceCreate = true;
     }
-    fullGPU = await checkGPUFit(newName);
+    fullGPU = await checkGPUFit(newName, { unified: isUnified });
 
     if (!fullGPU) {
       const { reduce } = await prompt([

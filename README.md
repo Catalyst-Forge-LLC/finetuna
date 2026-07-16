@@ -9,36 +9,47 @@ pnpm start
 
 ## Why it exists
 
-Ollama’s defaults are safe but often leave performance (and context) on the table. Hand-editing Modelfiles and guessing `num_ctx` / `num_batch` is slow. Tools that only *benchmark* max context are useful — Finetuna goes one step further: it **creates the tuned model**, checks **100% GPU** offload, and can **auto-tune** until you have a stable recipe for apps and agents.
+Ollama’s defaults are safe but often leave performance (and context) on the table. Hand-editing Modelfiles and guessing `num_ctx` / `num_batch` is slow. Tools that only *benchmark* max context are useful — Finetuna goes one step further: it **creates the tuned model**, checks **GPU / Metal fit**, and can **auto-tune** until you have a stable recipe for apps and agents.
 
 | You want… | Finetuna |
 |-----------|----------|
 | A named model you can `ollama run` forever | Yes — writes Modelfile + `ollama create` |
-| Proof it stays on the GPU | Yes — checks `ollama ps` for `100% GPU` |
+| Proof it stays on the GPU | Yes — checks `ollama ps` (`100% GPU` or Metal on Apple Silicon) |
 | Best context *and* batch for speed | Optional auto-tune (pivot from your pick, not always 4K→up) |
 | OpenClaw / agent-friendly presets | `--openclaw` / `--openclaw-agent` |
-| Free VRAM for another app that needs the card | `--unload` / `--reload` |
+| Free memory for another app that needs the GPU | `--unload` / `--reload` |
 
 Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on the Ollama service). Finetuna is the **interactive Modelfile tuner**.
 
 ## What a run looks like
 
-1. Choose a source model and a new name (list grouped vs **free** VRAM when nvidia-smi reports it; flags tight / too large / cloud)  
-2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft VRAM guide are labeled ambitious — not a hard limit)  
+1. Choose a source model and a new name (list grouped vs **free** memory when detectable; flags tight / too large / cloud)  
+2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft memory guide are labeled ambitious — not a hard limit)  
 3. Finetuna writes **`Modelfile-finetuna`** and runs **`ollama create`**  
 4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false` for clean benches)  
 5. Optionally auto-tunes `num_batch` then `num_ctx`, with before/after rates  
 6. Suggests a self-documenting name like `gemma4-ctx32k-flash`  
 7. Saves state for `--reload` later  
 
-Goal: an **optimum that still fits in VRAM** — not “always shrink context.” If your size already fits, auto-tune probes *up*; if it doesn’t, it steps *down*.
+Goal: an **optimum that still fits in memory** — not “always shrink context.” If your size already fits, auto-tune probes *up*; if it doesn’t, it steps *down*.
+
+### Apple Silicon (Mac)
+
+On M-series Macs there is no separate VRAM — CPU and GPU share **unified memory**. Finetuna detects that via `sysctl` / `vm_stat` and:
+
+- Reports total / available unified memory (not `nvidia-smi`)
+- Groups models against **available** memory, leaving headroom for macOS
+- Treats **Metal** / mostly-GPU `ollama ps` rows as a successful fit (not only `100% GPU`)
+- Skips CUDA flash-attention prompts (Ollama uses Metal; MLX preview on newer Ollama prefers ≥32GB)
+
+Use normal Ollama Metal/MLX models from the library — no special Finetuna flag required. Keep Ollama updated for the best Apple Silicon runners.
 
 ## Prerequisites
 
 - Node.js **18+**
 - [pnpm](https://pnpm.io/installation)
 - [Ollama](https://ollama.com) installed and running, with at least one model pulled
-- Optional: `nvidia-smi` (or AMD `rocm-smi` / Windows WMI) for total **and free** VRAM hints (flags when other apps are already using the GPU)
+- Optional: memory hints via `nvidia-smi` (VRAM), Apple `sysctl`/`vm_stat` (unified memory), AMD `rocm-smi`, or Windows WMI
 
 ## Install
 
@@ -126,7 +137,8 @@ pnpm start
 
 ## Tips
 
-- **VRAM hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU`) is the real check. Presets go through **128K**.
+- **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU` / Metal on Mac) is the real check. Presets go through **128K**.
+- **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.
 - **Auto-tune** recreates the model many times — use a lower `BENCH_REPEATS` for a quicker pass.
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`
