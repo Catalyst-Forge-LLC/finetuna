@@ -16,7 +16,7 @@ Ollama’s defaults are safe but often leave performance (and context) on the ta
 | A named model you can `ollama run` forever | Yes — writes Modelfile + `ollama create` |
 | Proof it stays on the GPU | Yes — checks `ollama ps` (`100% GPU` or Metal on Apple Silicon) |
 | Best context *and* batch for speed | Optional auto-tune (pivot from your pick, not always 4K→up) |
-| OpenClaw / agent-friendly presets | `--openclaw` / `--openclaw-agent` |
+| OpenClaw / Hermes / Continue presets | `--openclaw` / `--hermes` / `--continue` |
 | Free memory for another app that needs the GPU | `--unload` / `--reload` |
 
 Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on the Ollama service). Finetuna is the **interactive Modelfile tuner**.
@@ -78,7 +78,9 @@ Common invocations:
 
 ```bash
 node finetuna.js --auto-tune
-node finetuna.js --openclaw --auto-tune   # 64K-oriented OpenClaw preset
+node finetuna.js --hermes --auto-tune     # 64K + Hermes config snippet
+node finetuna.js --continue --auto-tune   # 16K coding preset + Continue snippet
+node finetuna.js --openclaw --auto-tune   # 64K OpenClaw + gemma4 template
 node finetuna.js --benchmark-report
 node finetuna.js --unload                 # free VRAM (alias: --panic)
 node finetuna.js --reload                 # warm last model from .finetuna-state.json
@@ -91,15 +93,19 @@ node finetuna.js --help
 |------|---------|
 | `--auto-tune` | Run batch/context benchmarks without the confirm prompt |
 | `--skip-batch` / `--skip-ctx` | Skip Phase 1 or Phase 2 of auto-tune |
-| `--openclaw` | OpenClaw preset: 64K context default, `num_keep 64`, Gemma4 template block |
+| `--openclaw` | OpenClaw preset: 64K context, `num_keep 64`, Gemma4 template block |
 | `--openclaw-agent` | Same as `--openclaw` plus `temperature 0.1` / `top_k 20` |
-| `--no-openclaw` | Disable OpenClaw block even if `FINETUNA_OPENCLAW` is set |
+| `--no-openclaw` | Clear OpenClaw preset even if `FINETUNA_OPENCLAW` is set |
+| `--hermes` | Hermes Agent preset: 64K context, `num_keep`, agent sampling + `~/.hermes/config.yaml` snippet |
+| `--continue` | Continue.dev preset: 16K context default, coding temperature + Continue `config.yaml` snippet |
 | `--flash-attn` / `--no-flash-attn` | Tag `-flash` naming + print `OLLAMA_FLASH_ATTENTION` setup tips |
 | `--benchmark-report` | Markdown table + `finetuna-benchmark.md` |
 | `--unload` / `--panic` | Evict loaded models from VRAM (`keep_alive: 0`) |
 | `--reload` | Load the last Finetuna model from `.finetuna-state.json` |
 | `--verbose` | Extra API / `ollama` diagnostics |
 | `--timeout` / `--gen-timeout` / `--bench-repeats` | Timing and repeat controls |
+
+Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes` | `--continue`.
 
 **Flash attention** is an Ollama *server* setting (`OLLAMA_FLASH_ATTENTION=1`), not a Modelfile parameter. Finetuna will not inject `flash_attn` (Ollama rejects it). Restart Ollama after changing the env var.
 
@@ -121,6 +127,8 @@ node finetuna.js --help
 | `FINETUNA_GEN_TIMEOUT` | Generation benchmark timeout (ms). Cold loads may need `120000+` | `60000` |
 | `BENCH_REPEATS` | Auto-tune repeats per candidate | `3` |
 | `FINETUNA_OPENCLAW` | `1` / `true` / `yes` → same as `--openclaw` | off |
+| `FINETUNA_HERMES` | `1` / `true` / `yes` → same as `--hermes` | off |
+| `FINETUNA_CONTINUE` | `1` / `true` / `yes` → same as `--continue` | off |
 | `FINETUNA_FLASH_ATTN` | Flash naming/tips; unset = prompt on capable GPUs | auto |
 
 ```bash
@@ -137,6 +145,7 @@ pnpm start
 
 ## Tips
 
+- **Client presets:** `--hermes` (64K agent + Hermes yaml), `--continue` (16K coding + Continue yaml), `--openclaw` (64K + gemma4 template). Last flag wins. Match client `contextLength` / `ollama_num_ctx` to the tuned `num_ctx`. Use `--unload` when switching apps that share the GPU.
 - **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU` / Metal on Mac) is the real check. Presets go through **128K**.
 - **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.

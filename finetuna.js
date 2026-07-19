@@ -45,8 +45,18 @@ const prompt = (questions) => {
 // https://grok.com/share/bGVnYWN5_c4d382dd-9452-4610-bff8-3cdbe9a4fb5d
 
 // Simple CLI flag parser
+function envFlagTruthy(name) {
+  return ['1', 'true', 'yes'].includes(String(process.env[name] || '').toLowerCase());
+}
+
 function parseFlags() {
   const argv = process.argv.slice(2);
+  // Env defaults (priority if several: openclaw > hermes > continue). CLI last-wins below.
+  let clientPreset = null;
+  if (envFlagTruthy('FINETUNA_OPENCLAW')) clientPreset = 'openclaw';
+  else if (envFlagTruthy('FINETUNA_HERMES')) clientPreset = 'hermes';
+  else if (envFlagTruthy('FINETUNA_CONTINUE')) clientPreset = 'continue';
+
   const flags = {
     timeoutMs: process.env.FINETUNA_TIMEOUT ? parseInt(process.env.FINETUNA_TIMEOUT, 10) : 20000,
     genTimeoutMs: process.env.FINETUNA_GEN_TIMEOUT ? parseInt(process.env.FINETUNA_GEN_TIMEOUT, 10) : 60000,
@@ -55,7 +65,8 @@ function parseFlags() {
     verbose: false,
     skipBatch: false,
     skipCtx: false,
-    openClaw: ['1', 'true', 'yes'].includes(String(process.env.FINETUNA_OPENCLAW || '').toLowerCase()),
+    /** @type {null|'openclaw'|'hermes'|'continue'} */
+    clientPreset,
     openClawAgent: false,
     /** null = auto-detect / benchmark; true/false = force */
     flashAttn: (() => {
@@ -83,9 +94,11 @@ function parseFlags() {
           '  --auto-tune           Skip auto-tune confirmation prompt',
           '  --skip-batch          Skip Phase 1 (num_batch sweep)',
           '  --skip-ctx            Skip Phase 2 (num_ctx sweep)',
-          '  --openclaw            OpenClaw Modelfile preset (64K ctx default, gemma4 template, num_keep 64)',
-          '  --openclaw-agent      Same as --openclaw with temperature 0.1 / top_k 20 (deterministic agents)',
-          '  --no-openclaw         Turn off OpenClaw block even if FINETUNA_OPENCLAW is set',
+          '  --openclaw            OpenClaw preset (64K ctx, gemma4 template, num_keep 64)',
+          '  --openclaw-agent      Same as --openclaw with temperature 0.1 / top_k 20',
+          '  --no-openclaw         Clear OpenClaw preset even if FINETUNA_OPENCLAW is set',
+          '  --hermes              Hermes Agent preset (64K ctx, num_keep, agent sampling + config snippet)',
+          '  --continue            Continue.dev preset (16K ctx default, coding temp + config snippet)',
           '  --flash-attn          Tag -flash naming + print OLLAMA_FLASH_ATTENTION setup tips',
           '  --no-flash-attn       Do not treat flash attention as enabled for naming/docs',
           '  --benchmark-report    Print markdown benchmark table (+ finetuna-benchmark.md)',
@@ -93,9 +106,13 @@ function parseFlags() {
           '  --reload              Reload last model from .finetuna-state.json',
           '  --verbose             Print raw ollama list / ollama ps output',
           '',
+          'Client presets (last flag wins if more than one): --openclaw | --hermes | --continue',
+          '',
           'Environment variables (override defaults, flags take precedence):',
           '  OLLAMA_HOST           Ollama HTTP base URL (default http://127.0.0.1:11434)',
-          '  FINETUNA_OPENCLAW     If 1/true/yes, same as --openclaw (use --no-openclaw to force off)',
+          '  FINETUNA_OPENCLAW     If 1/true/yes, same as --openclaw',
+          '  FINETUNA_HERMES       If 1/true/yes, same as --hermes',
+          '  FINETUNA_CONTINUE     If 1/true/yes, same as --continue',
           '  FINETUNA_FLASH_ATTN   1/true or 0/false for flash naming/docs (flash is a server env, not Modelfile)',
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
@@ -149,16 +166,28 @@ function parseFlags() {
       continue;
     }
     if (a === '--openclaw') {
-      flags.openClaw = true;
+      flags.clientPreset = 'openclaw';
+      flags.openClawAgent = false;
       continue;
     }
     if (a === '--openclaw-agent') {
-      flags.openClaw = true;
+      flags.clientPreset = 'openclaw';
       flags.openClawAgent = true;
       continue;
     }
     if (a === '--no-openclaw') {
-      flags.openClaw = false;
+      if (flags.clientPreset === 'openclaw') flags.clientPreset = null;
+      flags.openClawAgent = false;
+      continue;
+    }
+    if (a === '--hermes') {
+      flags.clientPreset = 'hermes';
+      flags.openClawAgent = false;
+      continue;
+    }
+    if (a === '--continue') {
+      flags.clientPreset = 'continue';
+      flags.openClawAgent = false;
       continue;
     }
     if (a === '--flash-attn') {
@@ -183,7 +212,15 @@ function parseFlags() {
     }
   }
 
+  // Backward-compatible aliases used throughout the file
+  flags.openClaw = flags.clientPreset === 'openclaw';
+  flags.hermes = flags.clientPreset === 'hermes';
+  flags.continueDev = flags.clientPreset === 'continue';
   return flags;
+}
+
+function wantsAgent64kCtx() {
+  return FLAGS.clientPreset === 'openclaw' || FLAGS.clientPreset === 'hermes';
 }
 
 const FLAGS = parseFlags();
@@ -1089,8 +1126,9 @@ function contextTierShortLabel(n) {
  * Build num_ctx sweep plan pivoted on the user's chosen size:
  * test current first → step down only if it fails GPU fit → then probe upward.
  */
-function buildCtxSweepPlan(currentCtx, { openClaw = false } = {}) {
-  const pool = openClaw ? [...OPENCLAW_CTX_TIERS] : [...CONTEXT_TIERS];
+function buildCtxSweepPlan(currentCtx, { clientPreset = null } = {}) {
+  const agent64k = clientPreset === 'openclaw' || clientPreset === 'hermes';
+  const pool = agent64k ? [...OPENCLAW_CTX_TIERS] : [...CONTEXT_TIERS];
   if (!pool.includes(currentCtx)) pool.push(currentCtx);
   const tiers = [...new Set(pool.filter((c) => c >= 2048))].sort((a, b) => a - b);
   const lowerDesc = tiers.filter((c) => c < currentCtx).sort((a, b) => b - a);
@@ -1098,13 +1136,19 @@ function buildCtxSweepPlan(currentCtx, { openClaw = false } = {}) {
   return { current: currentCtx, lowerDesc, higherAsc };
 }
 
-function getContextOptions(vramGB, { openClaw = false } = {}) {
+function getContextOptions(vramGB, { clientPreset = null } = {}) {
   const maxCtx = maxSuggestedCtxFromVram(vramGB);
   const opts = [];
+  const agent64k = clientPreset === 'openclaw' || clientPreset === 'hermes';
 
-  if (openClaw) {
+  if (agent64k) {
     for (const t of OPENCLAW_CTX_TIERS) {
-      let label = t === 65536 ? 'OpenClaw target (64K)' : contextTierShortLabel(t);
+      let label =
+        t === 65536
+          ? clientPreset === 'hermes'
+            ? 'Hermes target (64K)'
+            : 'OpenClaw target (64K)'
+          : contextTierShortLabel(t);
       if (t > maxCtx) label += ' — ambitious for this VRAM (often still OK)';
       opts.push({ name: `${t}  – ${label}`, value: t });
     }
@@ -1115,6 +1159,7 @@ function getContextOptions(vramGB, { openClaw = false } = {}) {
   // Always offer the full tier list (through 128K). Soft VRAM guide only annotates ambitious sizes.
   for (const t of CONTEXT_TIERS) {
     let label = contextTierShortLabel(t);
+    if (t === 16384 && clientPreset === 'continue') label = 'Continue.dev default (16K)';
     if (t > maxCtx) label += ' — ambitious for this VRAM (often still OK)';
     opts.push({ name: `${t}  – ${label}`, value: t });
   }
@@ -1133,31 +1178,91 @@ function unwrapChoice(choice) {
   return choice;
 }
 
+/** Extra Modelfile PARAMETER / TEMPLATE lines for client presets. */
+function clientPresetModelfileBlock(clientPreset, { openClawAgent = false } = {}) {
+  if (clientPreset === 'openclaw') {
+    return `# OpenClaw compatibility (see --openclaw / FINETUNA_OPENCLAW)
+TEMPLATE {{ .Prompt }}
+RENDERER gemma4
+PARSER gemma4
+${openClawAgent ? 'PARAMETER temperature 0.1\nPARAMETER top_k 20\n' : 'PARAMETER temperature 1\nPARAMETER top_k 64\n'}PARAMETER top_p 0.95
+PARAMETER num_keep 64
+
+`;
+  }
+  if (clientPreset === 'hermes') {
+    return `# Hermes Agent preset (see --hermes / FINETUNA_HERMES) — OpenAI-compat /v1; no gemma4 TEMPLATE
+PARAMETER temperature 0.1
+PARAMETER top_k 20
+PARAMETER top_p 0.95
+PARAMETER num_keep 64
+
+`;
+  }
+  if (clientPreset === 'continue') {
+    return `# Continue.dev preset (see --continue / FINETUNA_CONTINUE)
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+
+`;
+  }
+  return '';
+}
+
 /**
- * Build Modelfile text. With OpenClaw mode, embeds explicit Gemma4 TEMPLATE / RENDERER / PARSER,
- * num_keep 64, and sampling PARAMETERs.
+ * Build Modelfile text. Client presets may add TEMPLATE / sampling PARAMETERs.
  * Note: flash attention is NOT a Modelfile param — use OLLAMA_FLASH_ATTENTION on the Ollama server.
  */
 function buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, finetunaNote = '', flashAttn = false }) {
   const flashNote = flashAttn ? ' — flash attn via OLLAMA_FLASH_ATTENTION=1 on server' : '';
   const commentLine = finetunaNote ? `# ${vramComment} — ${finetunaNote}${flashNote}` : `# ${vramComment}${flashNote}`;
-  const openClawBlock = FLAGS.openClaw
-    ? `# OpenClaw compatibility (see --openclaw / FINETUNA_OPENCLAW)
-TEMPLATE {{ .Prompt }}
-RENDERER gemma4
-PARSER gemma4
-${FLAGS.openClawAgent ? 'PARAMETER temperature 0.1\nPARAMETER top_k 20\n' : 'PARAMETER temperature 1\nPARAMETER top_k 64\n'}PARAMETER top_p 0.95
-PARAMETER num_keep 64
-
-`
-    : '';
+  const presetBlock = clientPresetModelfileBlock(FLAGS.clientPreset, { openClawAgent: FLAGS.openClawAgent });
   return `FROM ${sourceModel}
 
-${openClawBlock}${commentLine}
+${presetBlock}${commentLine}
 PARAMETER num_ctx ${numCtx}
 PARAMETER num_gpu ${numGpu}
 PARAMETER num_batch ${numBatch}
 `;
+}
+
+/** Copy-paste client config after a successful tune. */
+function printClientConfigSnippet(clientPreset, { modelName, numCtx }) {
+  const base = String(OLLAMA_BASE || 'http://127.0.0.1:11434').replace(/\/$/, '');
+  const openaiBase = base.endsWith('/v1') ? base : `${base}/v1`;
+
+  if (clientPreset === 'hermes') {
+    console.log('\n── Hermes Agent (~/.hermes/config.yaml) ──');
+    console.log(`model:
+  default: "${modelName}"
+  provider: custom
+  base_url: "${openaiBase}"
+  context_length: ${numCtx}
+  max_tokens: ${numCtx}
+  ollama_num_ctx: ${numCtx}`);
+    console.log('──');
+    console.log('   Match ollama_num_ctx to num_ctx so Hermes does not fall back to Ollama’s tiny default.');
+    console.log('   Quit Hermes (or run: node finetuna.js --unload) before Finetuna so they do not fight for GPU memory.');
+    console.log('   Verify with: ollama ps  (CONTEXT column should show your num_ctx).\n');
+    return;
+  }
+
+  if (clientPreset === 'continue') {
+    console.log('\n── Continue.dev (~/.continue/config.yaml model entry) ──');
+    console.log(`models:
+  - name: Finetuna ${modelName}
+    provider: ollama
+    model: ${modelName}
+    apiBase: ${base}
+    contextLength: ${numCtx}
+    roles:
+      - chat
+      - edit
+      - apply`);
+    console.log('──');
+    console.log('   Keep contextLength in sync with this model’s num_ctx.');
+    console.log('   Autocomplete usually wants a smaller/faster model — use this Finetuna model for chat/edit/apply.\n');
+  }
 }
 
 /** Runtime /api/generate options — override Modelfile params for probing without ollama create. */
@@ -1653,12 +1758,18 @@ async function main() {
   const benchmarkRows = [];
   let pendingResultsLog = null;
 
-  if (FLAGS.openClaw) {
+  if (FLAGS.clientPreset === 'openclaw') {
     const agentNote = FLAGS.openClawAgent ? ' (agent sampling: temperature 0.1, top_k 20)' : '';
     console.log(
       `OpenClaw mode: 64K context default, num_keep 64, gemma4 TEMPLATE/RENDERER/PARSER${agentNote}.`,
     );
     console.log('Note: the gemma4 template block is meant for Gemma-class models — other families may need different templates.\n');
+  } else if (FLAGS.clientPreset === 'hermes') {
+    console.log('Hermes Agent mode: 64K context default, num_keep 64, agent sampling (temp 0.1).');
+    console.log('No gemma4 TEMPLATE (Hermes uses OpenAI-compat /v1). Config snippet printed at the end.\n');
+  } else if (FLAGS.clientPreset === 'continue') {
+    console.log('Continue.dev mode: 16K context default, coding temperature 0.2.');
+    console.log('Config snippet printed at the end — keep contextLength in sync with num_ctx.\n');
   }
   if (flashSupported) {
     console.log('NVIDIA GPU detected — flash attention is a server setting (OLLAMA_FLASH_ATTENTION), not Modelfile.\n');
@@ -1789,32 +1900,43 @@ async function main() {
   ]);
   const newName = sanitizeName(rawNewName.trim());
 
-  if (FLAGS.openClaw) {
+  if (wantsAgent64kCtx()) {
     const maxCtx = maxSuggestedCtxFromVram(vramGB);
+    const who = FLAGS.clientPreset === 'hermes' ? 'Hermes' : 'OpenClaw';
     if (vramGB == null) {
       console.log(
-        'OpenClaw targets 65536 context; VRAM could not be detected — start at 64K and trust GPU-fit / auto-tune.\n',
+        `${who} targets 65536 context; VRAM could not be detected — start at 64K and trust GPU-fit / auto-tune.\n`,
       );
     } else if (maxCtx < 65536) {
       console.log(
-        `OpenClaw targets 65536; soft guide for ~${vramGB}GB is ${maxCtx}. Smaller/quantized models often still fit — GPU-fit is authoritative.\n`,
+        `${who} targets 65536; soft guide for ~${vramGB}GB is ${maxCtx}. Smaller/quantized models often still fit — GPU-fit is authoritative.\n`,
       );
     }
   }
 
-  const ctxOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw });
+  const ctxOptions = getContextOptions(vramGB, { clientPreset: FLAGS.clientPreset });
   let ctxInitial = 0;
-  if (FLAGS.openClaw) {
+  if (wantsAgent64kCtx()) {
     const idx64 = ctxOptions.findIndex((o) => o.value === 65536);
     if (idx64 >= 0) ctxInitial = idx64;
+  } else if (FLAGS.clientPreset === 'continue') {
+    const idx16 = ctxOptions.findIndex((o) => o.value === 16384);
+    if (idx16 >= 0) ctxInitial = idx16;
   }
+  const ctxMessage =
+    FLAGS.clientPreset === 'openclaw'
+      ? 'OpenClaw context (num_ctx) — 64K target, step down if VRAM is tight:'
+      : FLAGS.clientPreset === 'hermes'
+        ? 'Hermes context (num_ctx) — 64K target, step down if memory is tight:'
+        : FLAGS.clientPreset === 'continue'
+          ? 'Continue.dev context (num_ctx) — 16K default (raise if your GPU allows):'
+          : 'Choose a context window size (num_ctx) — pick wisely, little tuna:';
+  const customCtxInitial = wantsAgent64kCtx() ? '65536' : FLAGS.clientPreset === 'continue' ? '16384' : '32768';
   const { ctxChoice } = await prompt([
     {
       type: 'select',
       name: 'ctxChoice',
-      message: FLAGS.openClaw
-        ? 'OpenClaw context (num_ctx) — 64K target, step down if VRAM is tight:'
-        : 'Choose a context window size (num_ctx) — pick wisely, little tuna:',
+      message: ctxMessage,
       choices: ctxOptions,
       initial: ctxInitial,
     },
@@ -1829,7 +1951,7 @@ async function main() {
               type: 'input',
               name: 'customCtx',
               message: 'Custom context size (any number):',
-              initial: FLAGS.openClaw ? '65536' : '32768',
+              initial: customCtxInitial,
             },
           ])).customCtx,
           10,
@@ -1939,7 +2061,7 @@ async function main() {
       let lastAlloc = extractCudaAllocBytes(beforeMetrics.errMsg);
 
       while (oomKind !== 'wont_fit') {
-        const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter(
+        const lowerOptions = getContextOptions(vramGB, { clientPreset: FLAGS.clientPreset }).filter(
           (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
         );
         if (lowerOptions.length === 0) {
@@ -2155,7 +2277,7 @@ async function main() {
       ]);
 
       // Pivot on the chosen size: current first → down if needed → up if it fits
-      const plan = buildCtxSweepPlan(currentCtx, { openClaw: FLAGS.openClaw });
+      const plan = buildCtxSweepPlan(currentCtx, { clientPreset: FLAGS.clientPreset });
       const preview = [plan.current, ...plan.lowerDesc, ...plan.higherAsc];
 
       console.log(
@@ -2398,7 +2520,15 @@ async function main() {
       timestamp: new Date().toISOString(),
       model: newName,
       source: sourceModel,
-      settings: { bestBatch, bestCtx, numGpu, openClaw: FLAGS.openClaw, openClawAgent: FLAGS.openClawAgent, flashAttn: sessionFlashAttn },
+      settings: {
+        bestBatch,
+        bestCtx,
+        numGpu,
+        clientPreset: FLAGS.clientPreset,
+        openClaw: FLAGS.openClaw,
+        openClawAgent: FLAGS.openClawAgent,
+        flashAttn: sessionFlashAttn,
+      },
       before: beforeMetrics?.success
         ? { evalRate: beforeMetrics.evalRate, promptEvalRate: beforeMetrics.promptEvalRate, tpsEval: beforeMetrics.tpsEval }
         : null,
@@ -2427,7 +2557,7 @@ async function main() {
       ]);
       if (!reduce) break;
 
-      const lowerOptions = getContextOptions(vramGB, { openClaw: FLAGS.openClaw }).filter(
+      const lowerOptions = getContextOptions(vramGB, { clientPreset: FLAGS.clientPreset }).filter(
         (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
       );
       lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
@@ -2478,6 +2608,7 @@ async function main() {
     numBatch: bestBatch != null ? bestBatch : parseInt(numBatch, 10) || 512,
     numGpu,
     flashAttn: sessionFlashAttn,
+    clientPreset: FLAGS.clientPreset,
     openClaw: FLAGS.openClaw,
   });
 
@@ -2500,6 +2631,7 @@ async function main() {
   console.log(`\n🎉 Finetuna complete! Your model is perfectly seasoned and ready to swim. 🐟`);
   console.log(`   Run it anytime with: ollama run ${finalName}`);
   console.log(`   Free VRAM quickly: node finetuna.js --unload`);
+  printClientConfigSnippet(FLAGS.clientPreset, { modelName: finalName, numCtx: currentCtx });
   console.log(`\nYour Modelfile is saved as "Modelfile-finetuna" — tweak it anytime!`);
 }
 
