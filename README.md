@@ -27,7 +27,7 @@ Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on
 2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft memory guide are labeled ambitious — not a hard limit)  
 3. Finetuna writes **`Modelfile-finetuna`** and runs **`ollama create`**  
 4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false` for clean benches)  
-5. Optionally auto-tunes `num_batch` then `num_ctx`, with before/after rates  
+5. Optionally auto-tunes `num_batch` then `num_ctx` (probes via API options; one final create), with before/after rates  
 6. Suggests a self-documenting name like `gemma4-ctx32k-flash`  
 7. Saves state for `--reload` later  
 
@@ -140,7 +140,7 @@ pnpm start
 - **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU` / Metal on Mac) is the real check. Presets go through **128K**.
 - **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.
-- **Auto-tune** recreates the model many times — use a lower `BENCH_REPEATS` for a quicker pass.
+- **Auto-tune** probes `num_batch` / `num_ctx` via `/api/generate` **options** (no recreate per candidate), then runs one final `ollama create` for the winner. Use a lower `BENCH_REPEATS` for an even quicker pass.
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 

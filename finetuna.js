@@ -384,7 +384,7 @@ async function freeGpuVram() {
       /* ignore */
     }
   }
-  await new Promise((r) => setTimeout(r, 1500));
+  await sleep(400);
 }
 
 function detectFlashAttnSupport() {
@@ -1160,56 +1160,135 @@ PARAMETER num_batch ${numBatch}
 `;
 }
 
-async function checkGPUFit(newName, { unified = false } = {}) {
+/** Runtime /api/generate options — override Modelfile params for probing without ollama create. */
+function runnerOptions({ numCtx, numBatch, numGpu, numPredict } = {}) {
+  const o = {};
+  if (numCtx != null && numCtx !== '') o.num_ctx = Number(numCtx);
+  if (numBatch != null && numBatch !== '') o.num_batch = Number(numBatch);
+  if (numGpu != null && numGpu !== '') o.num_gpu = Number(numGpu);
+  if (numPredict != null) o.num_predict = Number(numPredict);
+  return o;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function parseProcessorFromPsLine(line) {
+  let processorInfo = 'unknown';
+  let gpuPct = null;
+  let cpuPct = null;
+  const split = line.match(/(\d+)%\/(\d+)%\s*CPU\/GPU/i);
+  const full = line.match(/100%\s*GPU/i);
+  const metal = line.match(/\bMetal\b/i);
+  if (full) {
+    processorInfo = '100% GPU';
+    gpuPct = 100;
+    cpuPct = 0;
+  } else if (split) {
+    cpuPct = parseInt(split[1], 10);
+    gpuPct = parseInt(split[2], 10);
+    processorInfo = `${cpuPct}%/${gpuPct}% CPU/GPU`;
+  } else if (metal) {
+    processorInfo = 'Metal';
+    gpuPct = 100;
+  } else {
+    const anyGpu = line.match(/(\d+)%\s*GPU/i);
+    if (anyGpu) {
+      gpuPct = parseInt(anyGpu[1], 10);
+      processorInfo = `${gpuPct}% GPU`;
+    }
+  }
+  return { processorInfo, gpuPct, cpuPct };
+}
+
+function processorFitOk(processorInfo, gpuPct, unified) {
+  let ok = processorInfo === '100% GPU' || processorInfo === 'Metal' || (gpuPct != null && gpuPct >= 100);
+  if (!ok && unified) {
+    if (gpuPct != null && gpuPct >= 50) ok = true;
+    else if (processorInfo === 'unknown') ok = true;
+  }
+  return ok;
+}
+
+/**
+ * Confirm the model is loaded with acceptable GPU/Metal offload.
+ * Pass runner options to probe num_ctx/num_batch without recreating the model.
+ */
+async function checkGPUFit(newName, { unified = false, runner = {}, forceUnload = false } = {}) {
   console.log(`\n🔍 Testing ${unified ? 'Metal / GPU' : 'GPU'} fit... 🐟`);
 
-  // Unload any previously loaded version so ollama ps reflects the NEW model config
-  try {
-    spawnSync('ollama', ['stop', newName], { timeout: 5000 });
-  } catch (e) {
-    /* may not be running */
+  if (forceUnload) {
+    try {
+      spawnSync('ollama', ['stop', newName], { timeout: 5000 });
+    } catch {
+      /* may not be running */
+    }
+    await sleep(400);
   }
-  await new Promise((r) => setTimeout(r, 1500));
 
-  const loadAc = new AbortController();
-  activeAbortControllers.add(loadAc);
-  const loadBody = JSON.stringify({ model: newName, prompt: 'hi', stream: false, options: { num_predict: 1 } });
-  const loadPromise = fetch(`${OLLAMA_BASE}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: loadBody,
-    signal: loadAc.signal,
-  }).finally(() => activeAbortControllers.delete(loadAc));
+  const options = { num_predict: 1, ...runner };
+  let loadOom = false;
+  let loadErr = null;
+  try {
+    const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: newName, prompt: 'hi', stream: false, think: false, options }),
+      signal: createTimeoutSignal(FLAGS.genTimeoutMs),
+    });
+    const text = await res.text();
+    const data = text ? parseGenerateResponseBody(text) : null;
+    const errMsg = !res.ok
+      ? `HTTP ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`
+      : data?.error
+        ? String(data.error)
+        : null;
+    if (errMsg) {
+      loadErr = errMsg;
+      loadOom = isOomError(errMsg);
+      if (loadOom) {
+        console.log(`⚠️  Load OOM while probing (${printOomBrief(errMsg)}).`);
+        return false;
+      }
+    }
+  } catch (e) {
+    loadErr = e.name === 'AbortError' ? 'load timed out' : e.message || String(e);
+    if (isOomError(loadErr)) {
+      console.log(`⚠️  Load OOM while probing (${printOomBrief(loadErr)}).`);
+      return false;
+    }
+  }
 
-  // Poll ollama ps until the model appears (large models / first load can exceed 60s)
   let psOutput = '';
   let found = false;
-  for (let attempt = 0; attempt < 90; attempt++) {
-    await new Promise((r) => setTimeout(r, 2000));
+  let matchedLine = '';
+  for (let attempt = 0; attempt < 30; attempt++) {
     try {
       psOutput = execSync('ollama ps', { encoding: 'utf8' });
-    } catch (e) {
-      continue;
+      const psLines = psOutput.trim().split('\n');
+      matchedLine =
+        psLines.slice(1).find((l) => {
+          const rowName = l.trim().split(/\s+/)[0];
+          return rowName === newName || rowName === newName + ':latest';
+        }) || '';
+      if (matchedLine) {
+        found = true;
+        break;
+      }
+    } catch {
+      /* retry */
     }
-    // Match the NAME column exactly (first whitespace-delimited token on data rows)
-    const psLines = psOutput.trim().split('\n');
-    const matchedRow = psLines.slice(1).find((l) => l.trim().split(/\s+/)[0] === newName || l.trim().split(/\s+/)[0] === newName + ':latest');
-    if (matchedRow) {
-      found = true;
-      break;
+    if (attempt === 0 && loadErr) {
+      process.stdout.write(`   Waiting for model (${loadErr})…\r`);
+    } else {
+      process.stdout.write(`   Waiting for model to appear in ollama ps (${(attempt + 1) * 0.5}s)...\r`);
     }
-    process.stdout.write(`   Waiting for model to load (${(attempt + 1) * 2}s)...\r`);
-  }
-
-  loadAc.abort();
-  try {
-    await loadPromise;
-  } catch (_) {
-    /* aborted or completed */
+    await sleep(500);
   }
 
   if (!found) {
-    console.log('\nModel did not appear in ollama ps after ~3 minutes (first load can be slow for large models).');
+    console.log('\nModel did not appear in ollama ps after ~15s (cold load can be slow — try a higher FINETUNA_GEN_TIMEOUT).');
     return false;
   }
 
@@ -1218,52 +1297,13 @@ async function checkGPUFit(newName, { unified = false } = {}) {
     console.log(psOutput);
   }
 
-  const lines = psOutput.trim().split('\n');
-  let processorInfo = 'unknown';
-  let gpuPct = null;
-  let cpuPct = null;
-
-  for (let i = 1; i < lines.length; i++) {
-    const rowName = lines[i].trim().split(/\s+/)[0];
-    if (rowName === newName || rowName === newName + ':latest') {
-      const split = lines[i].match(/(\d+)%\/(\d+)%\s*CPU\/GPU/i);
-      const full = lines[i].match(/100%\s*GPU/i);
-      const metal = lines[i].match(/\bMetal\b/i);
-      if (full) {
-        processorInfo = '100% GPU';
-        gpuPct = 100;
-        cpuPct = 0;
-      } else if (split) {
-        cpuPct = parseInt(split[1], 10);
-        gpuPct = parseInt(split[2], 10);
-        processorInfo = `${cpuPct}%/${gpuPct}% CPU/GPU`;
-      } else if (metal) {
-        processorInfo = 'Metal';
-        gpuPct = 100;
-      } else {
-        const anyGpu = lines[i].match(/(\d+)%\s*GPU/i);
-        if (anyGpu) {
-          gpuPct = parseInt(anyGpu[1], 10);
-          processorInfo = `${gpuPct}% GPU`;
-        }
-      }
-      break;
-    }
-  }
-
-  // Discrete NVIDIA: require 100% GPU. Apple unified memory: Metal / mostly-GPU / unclear ps is OK.
-  let ok = processorInfo === '100% GPU' || processorInfo === 'Metal' || (gpuPct != null && gpuPct >= 100);
-  if (!ok && unified) {
-    if (gpuPct != null && gpuPct >= 50) ok = true;
-    else if (processorInfo === 'unknown') ok = true;
-  }
+  const { processorInfo, gpuPct } = parseProcessorFromPsLine(matchedLine);
+  const ok = processorFitOk(processorInfo, gpuPct, unified);
 
   if (processorInfo === '100% GPU' || processorInfo === 'Metal') {
     console.log(`✅ Perfect! Model is on ${processorInfo === 'Metal' ? 'Metal' : 'GPU'} — it's hooked! 🐟`);
   } else if (ok && unified) {
-    console.log(
-      `✅ Loaded on Apple Silicon (${processorInfo}) — unified memory, treating as GPU-fit OK.`,
-    );
+    console.log(`✅ Loaded on Apple Silicon (${processorInfo}) — unified memory, treating as GPU-fit OK.`);
   } else if (processorInfo === 'unknown') {
     console.log('⚠️  Could not confirm GPU offload from ollama ps (processor column unknown) — not treating as a hard fail.');
   } else {
@@ -1313,7 +1353,7 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {
     prompt: 'Tell me a short, fun fact about AI. Reply in one or two sentences.',
     stream: false,
     think: false,
-    options: { num_predict: 80 },
+    options: { num_predict: 80, ...(opts.runner || {}) },
   };
   const runUrl = `${OLLAMA_BASE}/api/generate`;
   const skipCliFallback = Boolean(opts.skipCliFallback);
@@ -1449,13 +1489,13 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {
 }
 
 // Measures prompt-eval speed (TTFT) using a long prompt — this is what num_batch actually affects
-async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
+async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs, opts = {}) {
   const body = {
     model: newName,
     prompt: LONG_PROMPT,
     stream: false,
     think: false,
-    options: { num_predict: 1 },
+    options: { num_predict: 1, ...(opts.runner || {}) },
   };
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
@@ -1498,11 +1538,11 @@ async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs) {
 }
 
 // Benchmark prompt-eval / TTFT over N repeats
-async function benchmarkPromptEval(newName, repeats = FLAGS.benchRepeats, label = '') {
+async function benchmarkPromptEval(newName, repeats = FLAGS.benchRepeats, label = '', runner = null) {
   const results = [];
   for (let i = 0; i < repeats; i++) {
     process.stdout.write(`   ${label}Run ${i + 1}/${repeats}… `);
-    const m = await getPromptEvalMetrics(newName);
+    const m = await getPromptEvalMetrics(newName, FLAGS.timeoutMs, { runner: runner || undefined });
     const tps = m.success ? (m.promptEvalRate ?? (m.promptTps !== 'N/A' ? parseFloat(m.promptTps) : 0)) : 0;
     if (m.success && tps > 0) {
       results.push(tps);
@@ -1512,7 +1552,7 @@ async function benchmarkPromptEval(newName, repeats = FLAGS.benchRepeats, label 
       results.push(0);
       console.log('failed');
     }
-    if (i < repeats - 1) await new Promise((r) => setTimeout(r, 500));
+    if (i < repeats - 1) await sleep(300);
   }
   const valid = results.filter((r) => r > 0);
   const sum = valid.reduce((a, b) => a + b, 0);
@@ -1523,11 +1563,11 @@ async function benchmarkPromptEval(newName, repeats = FLAGS.benchRepeats, label 
   return avg;
 }
 
-async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '') {
+async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '', runner = null) {
   const results = [];
   for (let i = 0; i < repeats; i++) {
     process.stdout.write(`   ${label}Run ${i + 1}/${repeats}… `);
-    const m = await getSpeedMetrics(newName);
+    const m = await getSpeedMetrics(newName, FLAGS.genTimeoutMs, { runner: runner || undefined });
     const tps = m.success ? (m.evalRate ?? (m.tpsEval !== 'N/A' ? parseFloat(m.tpsEval) : m.tpsWall !== 'N/A' ? parseFloat(m.tpsWall) : 0)) : 0;
     if (m.success && tps > 0) {
       results.push(tps);
@@ -1537,7 +1577,7 @@ async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '')
       results.push(0);
       console.log('failed');
     }
-    if (i < repeats - 1) await new Promise((r) => setTimeout(r, 1000));
+    if (i < repeats - 1) await sleep(400);
   }
   const valid = results.filter((r) => r > 0);
   const sum = valid.reduce((a, b) => a + b, 0);
@@ -1548,10 +1588,11 @@ async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '')
   return avg;
 }
 
-async function sampleBenchmarkRates(newName) {
+async function sampleBenchmarkRates(newName, runner = null) {
   // Sequential: parallel generates can contend on one loaded model
-  const gen = await getSpeedMetrics(newName);
-  const prompt = await getPromptEvalMetrics(newName);
+  const opts = runner ? { runner } : {};
+  const gen = await getSpeedMetrics(newName, FLAGS.genTimeoutMs, opts);
+  const prompt = await getPromptEvalMetrics(newName, FLAGS.timeoutMs, opts);
   const vramPeakMiB = queryGpuMemUsedMiB();
   return {
     evalRate: gen.success ? gen.evalRate : null,
@@ -1564,7 +1605,7 @@ async function sampleBenchmarkRates(newName) {
 async function collectComparisonMetrics(newName, opts = {}) {
   const gen = await getSpeedMetrics(newName, FLAGS.genTimeoutMs, opts);
   if (!gen.success) return gen;
-  const prompt = await getPromptEvalMetrics(newName);
+  const prompt = await getPromptEvalMetrics(newName, FLAGS.timeoutMs, opts);
   return {
     ...gen,
     promptEvalRate: prompt.success ? (prompt.promptEvalRate ?? (prompt.promptTps !== 'N/A' ? parseFloat(prompt.promptTps) : null)) : null,
@@ -2023,7 +2064,8 @@ async function main() {
       console.log('  Phase 1: num_batch sweep (prompt-eval speed / TTFT)');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('  num_batch affects prompt ingestion, not token generation.');
-      console.log('  Testing 50%–200% of your chosen batch in ~25% steps.\n');
+      console.log('  Testing 50%–200% of your chosen batch in ~25% steps.');
+      console.log('  Fast path: probe via /api/generate options (no ollama create until the end).\n');
 
       // 50%, 75%, 100%, 125%, 150%, 175%, 200%
       const batchCandidates = Array.from(
@@ -2044,23 +2086,23 @@ async function main() {
       for (let ci = 0; ci < batchCandidates.length; ci++) {
         const cand = batchCandidates[ci];
         console.log(`\n🐟 [${ci + 1}/${batchCandidates.length}] num_batch = ${cand}`);
-        const content = buildModelfileContent({ sourceModel, vramComment, numCtx: currentCtx, numGpu, numBatch: cand, flashAttn: sessionFlashAttn });
-        fs.writeFileSync(modelfilePath, content);
-        const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
-        if (createResult.status !== 0) {
-          console.log('   ⚠️  Failed to create model — skipping');
-          batchResults.push({ cand, avg: 0, gpu: false });
+        const runner = runnerOptions({ numCtx: currentCtx, numBatch: cand, numGpu });
+
+        // Reuse baseline prompt-eval for the original batch (already measured).
+        if (cand === currentBatch && beforeMetrics?.promptEvalRate > 0) {
+          console.log(`   Reusing baseline prompt-eval (${beforeMetrics.promptEvalRate.toFixed(1)} t/s) — skip re-bench`);
+          batchResults.push({ cand, avg: beforeMetrics.promptEvalRate, gpu: true, reused: true });
           continue;
         }
 
-        const gpuOk = await checkGPUFit(newName, { unified: isUnified });
+        const gpuOk = await checkGPUFit(newName, { unified: isUnified, runner });
         if (!gpuOk) {
           console.log(`   ⚠️  num_batch=${cand} not confirmed ${fitLabel} — skipping`);
           batchResults.push({ cand, avg: 0, gpu: false });
           continue;
         }
 
-        const avg = await benchmarkPromptEval(newName, repeatCount, `[batch=${cand}] `);
+        const avg = await benchmarkPromptEval(newName, repeatCount, `[batch=${cand}] `, runner);
         batchResults.push({ cand, avg, gpu: true });
       }
 
@@ -2097,7 +2139,8 @@ async function main() {
       console.log('  Phase 2: num_ctx sweep (generation TPS + GPU fit)');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('  num_ctx is the biggest lever for generation speed.');
-      console.log(`  Testing context sizes — skipping any that won't fit ${fitLabel}.\n`);
+      console.log(`  Testing context sizes — skipping any that won't fit ${fitLabel}.`);
+      console.log('  Fast path: probe via /api/generate options (no ollama create until the end).\n');
 
       const { ctxGoal } = await prompt([
         {
@@ -2126,28 +2169,27 @@ async function main() {
 
       async function tryCtxCandidate(cand) {
         console.log(`\n🐟 num_ctx = ${cand}${cand === currentCtx ? ' (current)' : ''}`);
-        const content = buildModelfileContent({
-          sourceModel,
-          vramComment,
-          numCtx: cand,
-          numGpu,
-          numBatch: bestBatch,
-          flashAttn: sessionFlashAttn,
-        });
-        fs.writeFileSync(modelfilePath, content);
-        const createResult = spawnSync('ollama', ['create', newName, '-f', modelfilePath], { stdio: 'inherit' });
-        if (createResult.status !== 0) {
-          console.log('   ⚠️  Failed to create model — skipping');
-          ctxResults.push({ cand, avg: 0, gpu: false });
-          return { ok: false, createFailed: true };
+        const runner = runnerOptions({ numCtx: cand, numBatch: bestBatch, numGpu });
+
+        // Reuse baseline gen rate when probing the original ctx+batch combo.
+        if (cand === baselineCtx && bestBatch === baselineBatch && beforeMetrics?.success) {
+          const reused =
+            beforeMetrics.evalRate ??
+            (beforeMetrics.tpsEval !== 'N/A' ? parseFloat(beforeMetrics.tpsEval) : NaN);
+          if (Number.isFinite(reused) && reused > 0) {
+            console.log(`   Reusing baseline generation rate (${reused.toFixed(1)} t/s) — skip re-bench`);
+            ctxResults.push({ cand, avg: reused, gpu: true, reused: true });
+            return { ok: true, avg: reused, gpuOk: true };
+          }
         }
-        const gpuOk = await checkGPUFit(newName, { unified: isUnified });
+
+        const gpuOk = await checkGPUFit(newName, { unified: isUnified, runner });
         if (!gpuOk) {
           console.log(`   ⚠️  num_ctx=${cand} not confirmed ${fitLabel}`);
           ctxResults.push({ cand, avg: 0, gpu: false });
           return { ok: false, gpuMiss: true };
         }
-        const avg = await benchmarkModel(newName, repeatCount, `[ctx=${cand}] `);
+        const avg = await benchmarkModel(newName, repeatCount, `[ctx=${cand}] `, runner);
         ctxResults.push({ cand, avg, gpu: true });
         // ok only when benches produced a usable rate (GPU-fit alone is not enough to early-stop)
         return { ok: avg > 0, avg, gpuOk: true };
@@ -2266,11 +2308,12 @@ async function main() {
 
     // ── Final: apply best settings ──
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  🏁 Auto-tune complete — applying best settings');
+    console.log('  🏁 Auto-tune complete — baking winner into Modelfile');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log(`   num_batch : ${currentBatch} → ${bestBatch}`);
     console.log(`   num_ctx   : ${currentCtx} → ${bestCtx}`);
     console.log(`   num_gpu   : ${numGpu}`);
+    console.log('   (Candidates were probed via API options; this is the durable ollama create.)');
 
     currentCtx = bestCtx;
     const finalContent = buildModelfileContent({
