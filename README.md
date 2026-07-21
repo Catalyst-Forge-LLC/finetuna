@@ -81,6 +81,7 @@ node finetuna.js --auto-tune
 node finetuna.js --hermes --auto-tune     # 64K + Hermes config snippet
 node finetuna.js --continue --auto-tune   # 16K coding preset + Continue snippet
 node finetuna.js --openclaw --auto-tune   # 64K OpenClaw + gemma4 template
+node finetuna.js --max-vram --auto-tune   # fill dedicated NVIDIA VRAM (high ctx)
 node finetuna.js --benchmark-report
 node finetuna.js --unload                 # free VRAM (alias: --panic)
 node finetuna.js --reload                 # warm last model from .finetuna-state.json
@@ -98,6 +99,7 @@ node finetuna.js --help
 | `--no-openclaw` | Clear OpenClaw preset even if `FINETUNA_OPENCLAW` is set |
 | `--hermes` | Hermes Agent preset: 64K context, `num_keep`, agent sampling + `~/.hermes/config.yaml` snippet |
 | `--continue` | Continue.dev preset: 16K context default, coding temperature + Continue `config.yaml` snippet |
+| `--max-vram` | Target max **dedicated NVIDIA** VRAM: high `num_ctx` default + auto-tune max-context (ignores Intel iGPU shared RAM) |
 | `--flash-attn` / `--no-flash-attn` | Tag `-flash` naming + print `OLLAMA_FLASH_ATTENTION` setup tips |
 | `--benchmark-report` | Markdown table + `finetuna-benchmark.md` |
 | `--unload` / `--panic` | Evict loaded models from VRAM (`keep_alive: 0`) |
@@ -129,6 +131,7 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 | `FINETUNA_OPENCLAW` | `1` / `true` / `yes` → same as `--openclaw` | off |
 | `FINETUNA_HERMES` | `1` / `true` / `yes` → same as `--hermes` | off |
 | `FINETUNA_CONTINUE` | `1` / `true` / `yes` → same as `--continue` | off |
+| `FINETUNA_MAX_VRAM` | `1` / `true` / `yes` → same as `--max-vram` | off |
 | `FINETUNA_FLASH_ATTN` | Flash naming/tips; unset = prompt on capable GPUs | auto |
 
 ```bash
@@ -146,6 +149,7 @@ pnpm start
 ## Tips
 
 - **Client presets:** `--hermes` (64K agent + Hermes yaml), `--continue` (16K coding + Continue yaml), `--openclaw` (64K + gemma4 template). Last flag wins. Match client `contextLength` / `ollama_num_ctx` to the tuned `num_ctx`. Use `--unload` when switching apps that share the GPU.
+- **`--max-vram`:** uses free **dedicated NVIDIA** VRAM (not Iris Xe shared RAM). Starts the context picker high and auto-tunes for largest fitting `num_ctx`. Close Cursor/other GPU apps first so more dedicated memory is free.
 - **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU` / Metal on Mac) is the real check. Presets go through **128K**.
 - **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.

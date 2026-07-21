@@ -78,6 +78,8 @@ function parseFlags() {
     benchmarkReport: false,
     unload: false,
     reload: false,
+    /** Push context toward filling free dedicated NVIDIA VRAM */
+    maxVram: envFlagTruthy('FINETUNA_MAX_VRAM'),
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -104,6 +106,7 @@ function parseFlags() {
           '  --benchmark-report    Print markdown benchmark table (+ finetuna-benchmark.md)',
           '  --unload, --panic     Evict all loaded models from VRAM (keep_alive: 0)',
           '  --reload              Reload last model from .finetuna-state.json',
+          '  --max-vram            Target max dedicated NVIDIA VRAM (high ctx default + max-context auto-tune)',
           '  --verbose             Print raw ollama list / ollama ps output',
           '',
           'Client presets (last flag wins if more than one): --openclaw | --hermes | --continue',
@@ -113,6 +116,7 @@ function parseFlags() {
           '  FINETUNA_OPENCLAW     If 1/true/yes, same as --openclaw',
           '  FINETUNA_HERMES       If 1/true/yes, same as --hermes',
           '  FINETUNA_CONTINUE     If 1/true/yes, same as --continue',
+          '  FINETUNA_MAX_VRAM     If 1/true/yes, same as --max-vram',
           '  FINETUNA_FLASH_ATTN   1/true or 0/false for flash naming/docs (flash is a server env, not Modelfile)',
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
@@ -208,6 +212,10 @@ function parseFlags() {
     }
     if (a === '--reload') {
       flags.reload = true;
+      continue;
+    }
+    if (a === '--max-vram') {
+      flags.maxVram = true;
       continue;
     }
   }
@@ -517,26 +525,60 @@ function detectGpuMemory() {
 
   try {
     const raw = execSync(
-      'nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheader,nounits',
+      'nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv,noheader,nounits',
       { encoding: 'utf8', timeout: 8000 },
-    )
-      .trim()
-      .split('\n')[0];
-    const parts = raw.split(',').map((s) => parseInt(s.trim(), 10));
-    const totalMiB = parts[0];
-    const usedMiB = Number.isFinite(parts[1]) ? parts[1] : null;
-    const freeMiB = Number.isFinite(parts[2]) ? parts[2] : null;
-    if (!Number.isFinite(totalMiB) || totalMiB < 1) throw new Error('bad nvidia-smi');
+    ).trim();
+    const devices = raw
+      .split('\n')
+      .map((line) => {
+        const cols = line.split(',').map((s) => s.trim());
+        if (cols.length < 5) return null;
+        const index = parseInt(cols[0], 10);
+        const name = cols.slice(1, -3).join(', ') || cols[1];
+        const totalMiB = parseInt(cols[cols.length - 3], 10);
+        const usedMiB = parseInt(cols[cols.length - 2], 10);
+        const freeMiB = parseInt(cols[cols.length - 1], 10);
+        if (!Number.isFinite(totalMiB) || totalMiB < 1) return null;
+        return {
+          index: Number.isFinite(index) ? index : 0,
+          name,
+          totalMiB,
+          usedMiB: Number.isFinite(usedMiB) ? usedMiB : null,
+          freeMiB: Number.isFinite(freeMiB) ? freeMiB : null,
+          totalGB: Math.max(1, Math.round(totalMiB / 1024)),
+          usedGB: Number.isFinite(usedMiB) ? Math.round((usedMiB / 1024) * 10) / 10 : null,
+          freeGB: Number.isFinite(freeMiB) ? Math.round((freeMiB / 1024) * 10) / 10 : null,
+        };
+      })
+      .filter(Boolean);
+    if (devices.length === 0) throw new Error('bad nvidia-smi');
+
+    // Prefer CUDA_VISIBLE_DEVICES first index; else the NVIDIA with most free dedicated VRAM.
+    let pick = devices[0];
+    const visible = String(process.env.CUDA_VISIBLE_DEVICES || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => /^\d+$/.test(s));
+    if (visible.length) {
+      const want = parseInt(visible[0], 10);
+      pick = devices.find((d) => d.index === want) || pick;
+    } else {
+      pick = [...devices].sort((a, b) => (b.freeMiB ?? 0) - (a.freeMiB ?? 0))[0] || pick;
+    }
+
     return {
       vendor: 'nvidia',
-      totalMiB,
-      usedMiB,
-      freeMiB,
-      totalGB: Math.max(1, Math.round(totalMiB / 1024)),
-      usedGB: usedMiB != null ? Math.round((usedMiB / 1024) * 10) / 10 : null,
-      freeGB: freeMiB != null ? Math.round((freeMiB / 1024) * 10) / 10 : null,
+      index: pick.index,
+      name: pick.name,
+      totalMiB: pick.totalMiB,
+      usedMiB: pick.usedMiB,
+      freeMiB: pick.freeMiB,
+      totalGB: pick.totalGB,
+      usedGB: pick.usedGB,
+      freeGB: pick.freeGB,
       processes: listGpuComputeApps(),
       unified: false,
+      devices,
     };
   } catch {
     try {
@@ -717,7 +759,26 @@ function printGpuMemoryReport(gpu, { prefix = '🧠' } = {}) {
     }
     return;
   }
-  if (gpu.freeGB != null && gpu.usedGB != null) {
+  if (gpu.vendor === 'nvidia') {
+    const label = gpu.name ? `${gpu.name}` : 'NVIDIA';
+    const idx = gpu.index != null ? `nvidia-smi GPU ${gpu.index}` : 'NVIDIA';
+    if (gpu.freeGB != null && gpu.usedGB != null) {
+      console.log(
+        `${prefix} Dedicated VRAM (${idx}): ${label} — ${gpu.totalGB}GB total · ~${gpu.freeGB}GB free · ~${gpu.usedGB}GB used`,
+      );
+    } else {
+      console.log(`${prefix} Dedicated VRAM (${idx}): ${label} — ${gpu.totalGB}GB`);
+    }
+    console.log('   Ollama/CUDA uses this dedicated pool — not Intel Iris Xe shared RAM (Task Manager GPU 0).');
+    if (Array.isArray(gpu.devices) && gpu.devices.length > 1) {
+      for (const d of gpu.devices) {
+        const mark = d.index === gpu.index ? '◀ selected' : '';
+        console.log(
+          `   · nvidia ${d.index}: ${d.name} — ${d.totalGB}GB (~${d.freeGB ?? '?'}GB free) ${mark}`.trim(),
+        );
+      }
+    }
+  } else if (gpu.freeGB != null && gpu.usedGB != null) {
     console.log(`${prefix} GPU: ${gpu.totalGB}GB total · ~${gpu.freeGB}GB free · ~${gpu.usedGB}GB used`);
   } else {
     console.log(`${prefix} Detected: ${gpu.totalGB} GB VRAM — nice rig!`);
@@ -1109,6 +1170,26 @@ function maxSuggestedCtxFromVram(vramGB) {
   return 131072;
 }
 
+/**
+ * Aggressive context target from *free* dedicated VRAM (--max-vram).
+ * Weights still have to fit; GPU-fit after load is authoritative.
+ */
+function maxCtxFromFreeDedicatedVram(freeGB) {
+  if (freeGB == null || freeGB < 1) return 65536;
+  if (freeGB >= 10) return 131072;
+  if (freeGB >= 8) return 98304;
+  if (freeGB >= 6) return 65536;
+  if (freeGB >= 4.5) return 49152;
+  if (freeGB >= 3) return 32768;
+  return 16384;
+}
+
+/** Largest CONTEXT_TIERS value at or below target. */
+function largestCtxTierAtOrBelow(target) {
+  const tiers = [...CONTEXT_TIERS].filter((t) => t <= target);
+  return tiers.length ? tiers[tiers.length - 1] : CONTEXT_TIERS[0];
+}
+
 function contextTierShortLabel(n) {
   if (n <= 4096) return 'Small / low memory';
   if (n <= 8192) return 'Common default range';
@@ -1136,8 +1217,8 @@ function buildCtxSweepPlan(currentCtx, { clientPreset = null } = {}) {
   return { current: currentCtx, lowerDesc, higherAsc };
 }
 
-function getContextOptions(vramGB, { clientPreset = null } = {}) {
-  const maxCtx = maxSuggestedCtxFromVram(vramGB);
+function getContextOptions(vramGB, { clientPreset = null, freeGB = null, maxVram = false } = {}) {
+  const softMax = maxVram ? maxCtxFromFreeDedicatedVram(freeGB ?? vramGB) : maxSuggestedCtxFromVram(vramGB);
   const opts = [];
   const agent64k = clientPreset === 'openclaw' || clientPreset === 'hermes';
 
@@ -1149,7 +1230,8 @@ function getContextOptions(vramGB, { clientPreset = null } = {}) {
             ? 'Hermes target (64K)'
             : 'OpenClaw target (64K)'
           : contextTierShortLabel(t);
-      if (t > maxCtx) label += ' — ambitious for this VRAM (often still OK)';
+      if (maxVram && t === softMax) label += ' — max-vram target';
+      else if (t > softMax) label += ' — ambitious for this VRAM (often still OK)';
       opts.push({ name: `${t}  – ${label}`, value: t });
     }
     opts.push({ name: 'custom', message: 'Custom (any number you want)' });
@@ -1159,8 +1241,9 @@ function getContextOptions(vramGB, { clientPreset = null } = {}) {
   // Always offer the full tier list (through 128K). Soft VRAM guide only annotates ambitious sizes.
   for (const t of CONTEXT_TIERS) {
     let label = contextTierShortLabel(t);
-    if (t === 16384 && clientPreset === 'continue') label = 'Continue.dev default (16K)';
-    if (t > maxCtx) label += ' — ambitious for this VRAM (often still OK)';
+    if (t === 16384 && clientPreset === 'continue' && !maxVram) label = 'Continue.dev default (16K)';
+    if (maxVram && t === softMax) label += ' — max-vram target (fill dedicated VRAM)';
+    else if (t > softMax) label += ' — ambitious for this VRAM (often still OK)';
     opts.push({ name: `${t}  – ${label}`, value: t });
   }
   // Enquirer Select returns choice.name, not choice.value — use name: 'custom' so the follow-up prompt runs.
@@ -1784,6 +1867,13 @@ async function main() {
   let vramFreeGB = gpu?.freeGB ?? null;
   let isUnified = Boolean(gpu?.unified);
   printGpuMemoryReport(gpu);
+  if (FLAGS.maxVram) {
+    const target = maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB);
+    console.log(
+      `🎯 --max-vram: aim to fill dedicated NVIDIA VRAM (soft target num_ctx ≈ ${target}; auto-tune uses max-context).`,
+    );
+    console.log('   Close other GPU apps / Cursor heavy tabs first so more dedicated memory is free for the model.\n');
+  }
   if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
   console.log('');
 
@@ -1914,24 +2004,40 @@ async function main() {
     }
   }
 
-  const ctxOptions = getContextOptions(vramGB, { clientPreset: FLAGS.clientPreset });
+  const ctxOptions = getContextOptions(vramGB, {
+    clientPreset: FLAGS.clientPreset,
+    freeGB: vramFreeGB,
+    maxVram: FLAGS.maxVram,
+  });
   let ctxInitial = 0;
-  if (wantsAgent64kCtx()) {
+  if (FLAGS.maxVram) {
+    const target = maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB);
+    const pick = largestCtxTierAtOrBelow(target);
+    const idx = ctxOptions.findIndex((o) => o.value === pick);
+    if (idx >= 0) ctxInitial = idx;
+  } else if (wantsAgent64kCtx()) {
     const idx64 = ctxOptions.findIndex((o) => o.value === 65536);
     if (idx64 >= 0) ctxInitial = idx64;
   } else if (FLAGS.clientPreset === 'continue') {
     const idx16 = ctxOptions.findIndex((o) => o.value === 16384);
     if (idx16 >= 0) ctxInitial = idx16;
   }
-  const ctxMessage =
-    FLAGS.clientPreset === 'openclaw'
+  const ctxMessage = FLAGS.maxVram
+    ? 'Context (num_ctx) — max-vram: start high to fill dedicated NVIDIA memory:'
+    : FLAGS.clientPreset === 'openclaw'
       ? 'OpenClaw context (num_ctx) — 64K target, step down if VRAM is tight:'
       : FLAGS.clientPreset === 'hermes'
         ? 'Hermes context (num_ctx) — 64K target, step down if memory is tight:'
         : FLAGS.clientPreset === 'continue'
           ? 'Continue.dev context (num_ctx) — 16K default (raise if your GPU allows):'
           : 'Choose a context window size (num_ctx) — pick wisely, little tuna:';
-  const customCtxInitial = wantsAgent64kCtx() ? '65536' : FLAGS.clientPreset === 'continue' ? '16384' : '32768';
+  const customCtxInitial = FLAGS.maxVram
+    ? String(maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB))
+    : wantsAgent64kCtx()
+      ? '65536'
+      : FLAGS.clientPreset === 'continue'
+        ? '16384'
+        : '32768';
   const { ctxChoice } = await prompt([
     {
       type: 'select',
@@ -2061,9 +2167,11 @@ async function main() {
       let lastAlloc = extractCudaAllocBytes(beforeMetrics.errMsg);
 
       while (oomKind !== 'wont_fit') {
-        const lowerOptions = getContextOptions(vramGB, { clientPreset: FLAGS.clientPreset }).filter(
-          (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
-        );
+        const lowerOptions = getContextOptions(vramGB, {
+          clientPreset: FLAGS.clientPreset,
+          freeGB: vramFreeGB,
+          maxVram: FLAGS.maxVram,
+        }).filter((o) => o.value != null && o.value !== 'custom' && o.value < currentCtx);
         if (lowerOptions.length === 0) {
           printOomGuidance({
             sourceModel,
@@ -2264,17 +2372,23 @@ async function main() {
       console.log(`  Testing context sizes — skipping any that won't fit ${fitLabel}.`);
       console.log('  Fast path: probe via /api/generate options (no ollama create until the end).\n');
 
-      const { ctxGoal } = await prompt([
-        {
-          type: 'select',
-          name: 'ctxGoal',
-          message: 'What do you want to optimize for? 🐟',
-          choices: [
-            { name: 'max-context', message: `Max context  — largest window that still fits ${fitLabel}` },
-            { name: 'max-speed', message: `Max speed    — fastest generation TPS at ${fitLabel}` },
-          ],
-        },
-      ]);
+      let ctxGoal = 'max-context';
+      if (FLAGS.maxVram) {
+        console.log('🎯 --max-vram: optimizing for largest context that still fits dedicated VRAM.\n');
+      } else {
+        const r = await prompt([
+          {
+            type: 'select',
+            name: 'ctxGoal',
+            message: 'What do you want to optimize for? 🐟',
+            choices: [
+              { name: 'max-context', message: `Max context  — largest window that still fits ${fitLabel}` },
+              { name: 'max-speed', message: `Max speed    — fastest generation TPS at ${fitLabel}` },
+            ],
+          },
+        ]);
+        ctxGoal = r.ctxGoal;
+      }
 
       // Pivot on the chosen size: current first → down if needed → up if it fits
       const plan = buildCtxSweepPlan(currentCtx, { clientPreset: FLAGS.clientPreset });
@@ -2557,9 +2671,11 @@ async function main() {
       ]);
       if (!reduce) break;
 
-      const lowerOptions = getContextOptions(vramGB, { clientPreset: FLAGS.clientPreset }).filter(
-        (o) => o.value != null && o.value !== 'custom' && o.value < currentCtx,
-      );
+      const lowerOptions = getContextOptions(vramGB, {
+        clientPreset: FLAGS.clientPreset,
+        freeGB: vramFreeGB,
+        maxVram: FLAGS.maxVram,
+      }).filter((o) => o.value != null && o.value !== 'custom' && o.value < currentCtx);
       lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
 
       const { newCtxChoice } = await prompt([{ type: 'select', name: 'newCtxChoice', message: 'Pick a lower context size to try:', choices: lowerOptions }]);
