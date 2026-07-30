@@ -150,6 +150,7 @@ pnpm start
 
 - **Client presets:** `--hermes` (64K agent + Hermes yaml), `--continue` (16K coding + Continue yaml), `--openclaw` (64K + gemma4 template). Last flag wins. Match client `contextLength` / `ollama_num_ctx` to the tuned `num_ctx`. Use `--unload` when switching apps that share the GPU.
 - **`--max-vram`:** uses free **dedicated NVIDIA** VRAM (not Iris Xe shared RAM). Starts the context picker high and auto-tunes for largest fitting `num_ctx`. Close Cursor/other GPU apps first so more dedicated memory is free.
+- **GPU-heavy apps:** browsers (Brave/Chrome), IDEs, and other compute apps can quietly park several GB of VRAM. Finetuna flags them by name in the `GPU processes` line and low-free warnings (e.g. `brave.exe (browser — can hold GBs)`) and, with `--max-vram`, nudges you to close the specific offenders. On Windows, per-process VRAM shows as N/A (WDDM), so use `nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader` to see exact amounts.
 - **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU` / Metal on Mac) is the real check. Presets go through **128K**.
 - **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.

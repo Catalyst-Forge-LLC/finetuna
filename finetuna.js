@@ -675,6 +675,20 @@ function detectAppleSiliconMemory() {
   }
 }
 
+// Apps that commonly park GBs of VRAM (hardware-accelerated rendering / compute).
+// On Windows (WDDM) nvidia-smi reports per-process memory as N/A, so naming them is the best hint.
+const GPU_HEAVY_APPS = [
+  { re: /\b(brave|chrome|chromium|msedge|edge|firefox|opera|vivaldi|arc|zen)\b/i, kind: 'browser' },
+  { re: /\b(cursor|code|electron|slack|discord|spotify|teams|obs|obs64)\b/i, kind: 'app' },
+  { re: /\b(comfyui|stable-diffusion|a1111|python|node)\b/i, kind: 'compute' },
+];
+
+/** @returns {null|'browser'|'app'|'compute'} category if this process typically holds significant VRAM. */
+function gpuHeavyKind(name) {
+  for (const { re, kind } of GPU_HEAVY_APPS) if (re.test(String(name || ''))) return kind;
+  return null;
+}
+
 function listGpuComputeApps() {
   try {
     const raw = execSync(
@@ -693,14 +707,28 @@ function listGpuComputeApps() {
         const pathName = cols.length > 2 ? cols.slice(1, -1).join(',') : cols[1];
         const name = String(pathName || 'unknown').replace(/^.*[\\/]/, '');
         if (!pid || /insufficient permissions/i.test(name)) {
-          return { pid, name: name || 'other', usedMiB };
+          return { pid, name: name || 'other', usedMiB, heavy: null };
         }
-        return { pid, name, usedMiB };
+        return { pid, name, usedMiB, heavy: gpuHeavyKind(name) };
       })
       .filter(Boolean);
   } catch {
     return [];
   }
+}
+
+/** Distinct GPU-heavy processes (browsers, IDEs, etc.) worth closing to free VRAM. */
+function reclaimableGpuApps(processes) {
+  const seen = new Set();
+  const out = [];
+  for (const p of processes || []) {
+    if (!p.heavy) continue;
+    const key = String(p.name || '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
 }
 
 /** Total memory in GB (VRAM or unified). Prefer detectGpuMemory() when free/used matter. */
@@ -716,7 +744,7 @@ function gpuFitLabel(gpu) {
   return gpu?.unified ? 'Metal / GPU' : '100% GPU';
 }
 
-function formatGpuProcessSummary(processes, { limit = 5 } = {}) {
+function formatGpuProcessSummary(processes, { limit = 5, tagHeavy = true } = {}) {
   if (!processes?.length) return '';
   const names = [];
   const seen = new Set();
@@ -728,7 +756,7 @@ function formatGpuProcessSummary(processes, { limit = 5 } = {}) {
     const key = n.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    names.push(n);
+    names.push(tagHeavy && p.heavy ? `${n} (${p.heavy} — can hold GBs)` : n);
     if (names.length >= limit) break;
   }
   return names.join(', ');
@@ -805,10 +833,15 @@ async function warnIfLowFreeVram(gpu) {
   console.log(
     `\n⚠️  Only ~${gpu.freeGB}GB available of ${gpu.totalGB}GB ${pool}${procs ? ` (${procs})` : ''}.`,
   );
+  const reclaim = reclaimableGpuApps(gpu.processes);
+  if (reclaim.length) {
+    const names = reclaim.map((p) => p.name).join(', ');
+    console.log(`   Closing ${names} could free several GB of ${pool}.`);
+  }
   console.log(
     gpu.unified
       ? '   Quit heavy apps (browsers, IDEs, other local models) so Metal has headroom, or continue with current availability.\n'
-      : '   Close other GPU apps (or Hermes), or continue knowing fit estimates use free VRAM.\n',
+      : '   Close the apps above (or run with --unload to evict other models), or continue knowing fit estimates use free VRAM.\n',
   );
   const { cont } = await prompt([
     {
@@ -1872,7 +1905,15 @@ async function main() {
     console.log(
       `🎯 --max-vram: aim to fill dedicated NVIDIA VRAM (soft target num_ctx ≈ ${target}; auto-tune uses max-context).`,
     );
-    console.log('   Close other GPU apps / Cursor heavy tabs first so more dedicated memory is free for the model.\n');
+    const reclaim = reclaimableGpuApps(gpu?.processes);
+    if (reclaim.length) {
+      const names = reclaim.map((p) => p.name).join(', ');
+      console.log(
+        `   ~${gpu?.freeGB ?? vramFreeGB ?? '?'}GB free now — closing ${names} could add several GB of headroom.\n`,
+      );
+    } else {
+      console.log('   Close other GPU apps / Cursor heavy tabs first so more dedicated memory is free for the model.\n');
+    }
   }
   if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
   console.log('');
