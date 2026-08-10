@@ -20,6 +20,7 @@ import {
   gpuFitFromPsModel,
 } from './lib/ollama-host.js';
 import { resolveFinetunaPaths, ensureDataDir } from './lib/paths.js';
+import { isEmbeddingOnly, filterGenerativeModels } from './lib/capabilities.js';
 
 const require = createRequire(import.meta.url);
 const colors = require('ansi-colors');
@@ -107,8 +108,18 @@ function parseFlags() {
     check: false,
     /** Machine-readable JSON report on stdout */
     json: false,
-    /** Optional model name for --check / scripting */
+    /** Optional model name for --check / scripting / non-interactive source */
     model: null,
+    /** New model name (non-interactive) */
+    name: null,
+    /** num_ctx when provided on CLI */
+    ctx: null,
+    /** num_batch when provided on CLI */
+    batch: null,
+    /** num_gpu when provided on CLI */
+    gpuLayers: null,
+    /** Re-check GPU-fit for an existing model */
+    verify: null,
     /** Push context toward filling free dedicated NVIDIA VRAM */
     maxVram: envFlagTruthy('FINETUNA_MAX_VRAM'),
   };
@@ -125,7 +136,12 @@ function parseFlags() {
           '',
           'Options:',
           '  --check, --dry-run    Report memory + fit hints (no ollama create)',
-          '  --model <name>        Focus --check on one model',
+          '  --verify <name>       Re-check GPU-fit for an existing model',
+          '  --model <name>        Source model (--check focus, or non-interactive create)',
+          '  --name <name>         New model name (non-interactive create)',
+          '  --ctx <n>             num_ctx (non-interactive; skips context picker)',
+          '  --batch <n>           num_batch (non-interactive; default 512)',
+          '  --gpu <n>             num_gpu (non-interactive; default 999)',
           '  --json                Emit machine-readable JSON report on stdout',
           '  --timeout <ms>        Prompt-eval / API timeout (default: 20000)',
           '  --gen-timeout <ms>    Generation benchmark timeout (default: 120000)',
@@ -273,6 +289,51 @@ function parseFlags() {
     }
     if (a.startsWith('--model=')) {
       flags.model = a.slice('--model='.length) || null;
+      continue;
+    }
+    if ((a === '--name' || a === '--new-name') && next) {
+      flags.name = next;
+      i++;
+      continue;
+    }
+    if (a.startsWith('--name=')) {
+      flags.name = a.slice('--name='.length) || null;
+      continue;
+    }
+    if ((a === '--ctx' || a === '--num-ctx') && next) {
+      flags.ctx = parseInt(next, 10);
+      i++;
+      continue;
+    }
+    if (a.startsWith('--ctx=')) {
+      flags.ctx = parseInt(a.slice('--ctx='.length), 10);
+      continue;
+    }
+    if ((a === '--batch' || a === '--num-batch') && next) {
+      flags.batch = parseInt(next, 10);
+      i++;
+      continue;
+    }
+    if (a.startsWith('--batch=')) {
+      flags.batch = parseInt(a.slice('--batch='.length), 10);
+      continue;
+    }
+    if ((a === '--gpu' || a === '--num-gpu') && next) {
+      flags.gpuLayers = parseInt(next, 10);
+      i++;
+      continue;
+    }
+    if (a.startsWith('--gpu=')) {
+      flags.gpuLayers = parseInt(a.slice('--gpu='.length), 10);
+      continue;
+    }
+    if (a === '--verify' && next) {
+      flags.verify = next;
+      i++;
+      continue;
+    }
+    if (a.startsWith('--verify=')) {
+      flags.verify = a.slice('--verify='.length) || null;
       continue;
     }
   }
@@ -907,6 +968,10 @@ async function warnIfLowFreeVram(gpu) {
       ? '   Quit heavy apps (browsers, IDEs, other local models) so Metal has headroom, or continue with current availability.\n'
       : '   Close the apps above (or run with --unload to evict other models), or continue knowing fit estimates use free VRAM.\n',
   );
+  if (!canPrompt()) {
+    if (!FLAGS.json) console.log('   Non-interactive: continuing with current free memory.\n');
+    return true;
+  }
   const { cont } = await prompt([
     {
       type: 'confirm',
@@ -1094,6 +1159,81 @@ function sanitizeName(name) {
     throw new Error(`Invalid model name "${name}" — only letters, numbers, -, _, ., : are allowed.`);
   }
   return name;
+}
+
+/** Interactive prompts only when stdin is a TTY (non-interactive otherwise). */
+function canPrompt() {
+  return Boolean(process.stdin.isTTY);
+}
+
+function requireFlag(value, flagName, hint) {
+  if (value != null && value !== '' && !(typeof value === 'number' && !Number.isFinite(value))) return value;
+  console.error(`Missing ${flagName}${hint ? ` — ${hint}` : ''}`);
+  process.exit(1);
+}
+
+async function fetchModelShow(name) {
+  const res = await fetch(`${OLLAMA_BASE}/api/show`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+    signal: createTimeoutSignal(20000),
+  });
+  if (!res.ok) throw new Error(`POST /api/show failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Re-check GPU-fit for an existing model (driver / Ollama / shared-GPU drift).
+ */
+async function runVerify(modelName) {
+  const name = sanitizeName(String(modelName).trim());
+  const gpu = OLLAMA_IS_LOCAL ? detectGpuMemory() : null;
+  const unified = Boolean(gpu?.unified);
+  if (!FLAGS.json) {
+    console.log(`\n🐟 Verifying GPU fit for ${name}…\n`);
+    if (!OLLAMA_IS_LOCAL) {
+      console.log(`⚠️  Remote Ollama (${OLLAMA_HOST_LABEL}) — fit uses /api/ps on the server.\n`);
+    }
+  }
+  let show = null;
+  try {
+    show = await fetchModelShow(name);
+  } catch (e) {
+    if (FLAGS.verbose) console.log(`   [verbose] /api/show: ${e.message}`);
+  }
+  const ok = await checkGPUFit(name, { unified });
+  let psRow = null;
+  try {
+    psRow = findPsModel(await fetchPsModelsHttp(), name);
+  } catch {
+    /* optional */
+  }
+  const fit = psRow ? gpuFitFromPsModel(psRow, { unified }) : null;
+  const report = {
+    ok,
+    mode: 'verify',
+    version: '1.1.0',
+    model: name,
+    ollamaBase: OLLAMA_BASE,
+    local: OLLAMA_IS_LOCAL,
+    unified,
+    fit,
+    size: psRow?.size ?? null,
+    sizeVram: psRow?.sizeVram ?? null,
+    capabilities: show?.capabilities || null,
+    family: show?.details?.family || null,
+  };
+  if (FLAGS.json) {
+    emitJsonReport(report);
+  } else if (ok) {
+    console.log(`\n✅ ${name} still fits on the GPU.\n`);
+  } else {
+    console.log(`\n⚠️  ${name} is not fully on the GPU (or failed to load).`);
+    console.log('   Re-run Finetuna with a lower num_ctx, free VRAM, or --check for soft guidance.\n');
+    process.exitCode = 1;
+  }
+  return report;
 }
 
 const activeAbortControllers = new Set();
@@ -1844,7 +1984,9 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {
     model: newName,
     prompt: LONG_PROMPT,
     stream: false,
-    think: false,
+    // think:false must stay top-level for thinking models; harmless on others.
+    // Prefer sending when capability is thinking or unknown (opts.forceThinkFalse).
+    think: opts.think !== undefined ? opts.think : false,
     options: { num_predict: numPredict, seed, ...(opts.runner || {}) },
   };
   const runUrl = `${OLLAMA_BASE}/api/generate`;
@@ -2134,6 +2276,7 @@ async function collectComparisonMetrics(newName, opts = {}) {
 async function maybeRenameWithSuggested(currentName, numCtx, flashAttn) {
   const suggested = suggestModelName(currentName, numCtx, flashAttn);
   if (suggested === currentName) return currentName;
+  if (!canPrompt()) return currentName;
   const r = await prompt([
     {
       type: 'confirm',
@@ -2161,11 +2304,27 @@ async function main() {
     await reloadLastModel();
     return;
   }
+  if (FLAGS.verify) {
+    await runVerify(FLAGS.verify);
+    return;
+  }
   if (FLAGS.check) {
     const report = await buildCheckReport({ modelFilter: FLAGS.model });
     if (FLAGS.json) emitJsonReport(report);
     else printCheckReport(report);
     return;
+  }
+
+  const nonInteractive = Boolean(FLAGS.model && FLAGS.name);
+  if (nonInteractive && !canPrompt() && FLAGS.ctx == null) {
+    // ctx optional with presets, but need a concrete number for scripting without TTY
+    if (!wantsAgent64kCtx() && FLAGS.clientPreset !== 'continue' && !FLAGS.maxVram) {
+      requireFlag(FLAGS.ctx, '--ctx', 'required for non-interactive create without a client preset');
+    }
+  }
+  if (FLAGS.name && !FLAGS.model) {
+    console.error('`--name` requires `--model <source>` for non-interactive create.');
+    process.exit(1);
   }
 
   if (!FLAGS.json) {
@@ -2264,25 +2423,32 @@ async function main() {
 
   // Fetch models
   let models = [];
+  let tagsByName = new Map();
   try {
-    const output = execSync('ollama list', { encoding: 'utf8' });
-    console.log('🐟 Diving into the school of models...\n');
-    if (FLAGS.verbose) {
-      console.log('--- Raw ollama list output ---');
-      console.log(output);
-      console.log('--- End raw output ---\n');
+    tagsByName = await fetchOllamaTagsByName();
+    models = [...new Set([...tagsByName.keys()].filter((n) => n.includes(':')))];
+  } catch {
+    /* fall through to CLI */
+  }
+  if (!models.length) {
+    try {
+      const output = execSync('ollama list', { encoding: 'utf8' });
+      if (FLAGS.verbose) {
+        console.log('--- Raw ollama list output ---');
+        console.log(output);
+        console.log('--- End raw output ---\n');
+      }
+      const lines = output.trim().split('\n');
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const match = line.match(/^([^\s]+)/);
+        if (match && match[1].includes(':')) models.push(match[1]);
+      }
+    } catch {
+      console.error('Could not list models via /api/tags or `ollama list`. Is Ollama running?');
+      process.exit(1);
     }
-
-    const lines = output.trim().split('\n');
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      const match = line.match(/^([^\s]+)/);
-      if (match && match[1].includes(':')) models.push(match[1]);
-    }
-  } catch (err) {
-    console.error('Could not run "ollama list". Is Ollama running?');
-    process.exit(1);
   }
 
   if (models.length === 0) {
@@ -2290,75 +2456,115 @@ async function main() {
     process.exit(1);
   }
 
+  const { kept: generativeModels, skipped: embeddingSkipped } = filterGenerativeModels(models, tagsByName);
+  if (embeddingSkipped.length && !FLAGS.json) {
+    console.log(
+      `Skipping ${embeddingSkipped.length} embedding-only model(s): ${embeddingSkipped.slice(0, 5).join(', ')}${embeddingSkipped.length > 5 ? '…' : ''}`,
+    );
+  }
+  models = generativeModels.length ? generativeModels : models;
+
   let modelChoices = models;
-  let tagsByName = new Map();
   try {
-    tagsByName = await fetchOllamaTagsByName();
+    if (!tagsByName.size) tagsByName = await fetchOllamaTagsByName();
     const built = buildModelSelectChoices(models, tagsByName, vramGB, { freeGB: vramFreeGB, unified: isUnified });
     modelChoices = built.choices;
     const flagged = built.annotated.filter((a) => a.fit.tier === 'tight' || a.fit.tier === 'wont_fit' || a.fit.tier === 'cloud');
-    console.log(`Found ${models.length} model(s).`);
-    if (vramGB != null && flagged.length) {
-      const vs =
-        vramFreeGB != null && Math.abs(vramFreeGB - vramGB) >= 0.5
-          ? `~${vramFreeGB}GB available (of ${vramGB}GB ${isUnified ? 'unified' : 'VRAM'})`
-          : `~${vramGB}GB ${isUnified ? 'unified memory' : 'VRAM'}`;
-      console.log(
-        `Grouped by fit vs ${vs} (on-disk size ≈ weights; vision needs more). Still selectable — GPU-fit is authoritative.\n`,
-      );
-    } else {
-      console.log('');
+    if (!FLAGS.json) {
+      console.log(`🐟 Diving into the school of models...\nFound ${models.length} generative model(s).`);
+      if (vramGB != null && flagged.length) {
+        const vs =
+          vramFreeGB != null && Math.abs(vramFreeGB - vramGB) >= 0.5
+            ? `~${vramFreeGB}GB available (of ${vramGB}GB ${isUnified ? 'unified' : 'VRAM'})`
+            : `~${vramGB}GB ${isUnified ? 'unified memory' : 'VRAM'}`;
+        console.log(
+          `Grouped by fit vs ${vs} (on-disk size ≈ weights; vision needs more). Still selectable — GPU-fit is authoritative.\n`,
+        );
+      } else {
+        console.log('');
+      }
     }
   } catch (err) {
-    console.log(`Found ${models.length} model(s) swimming around!`);
-    if (FLAGS.verbose) console.log(`   [verbose] /api/tags unavailable (${err.message}); plain list.\n`);
-    else console.log('');
+    if (!FLAGS.json) {
+      console.log(`Found ${models.length} model(s) swimming around!`);
+      if (FLAGS.verbose) console.log(`   [verbose] /api/tags unavailable (${err.message}); plain list.\n`);
+      else console.log('');
+    }
   }
 
-  const { sourceModel } = await prompt([
-    {
-      type: 'select',
-      name: 'sourceModel',
-      message: 'Which model shall we season and release into the shoal? 🐟',
-      choices: modelChoices,
-    },
-  ]);
-
-  const sourceFit = classifyModelFit(
-    sourceModel,
-    tagsByName.get(sourceModel) || tagsByName.get(sourceModel.replace(/:latest$/, '')) || null,
-    vramGB,
-    { freeGB: vramFreeGB, unified: isUnified },
-  );
-  if (sourceFit.tier === 'wont_fit') {
-    console.log(`\n⚠️  ${sourceModel} looks too large for ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}).`);
-    console.log(
-      isUnified
-        ? '   You can continue, but expect pressure/OOM — free RAM or pick a smaller sibling.\n'
-        : '   You can continue, but expect load OOM — free VRAM or pick a smaller sibling.\n',
-    );
-  } else if (sourceFit.tier === 'cloud') {
-    console.log(`\n⚠️  ${sourceModel} looks like a cloud/remote model — local GPU tuning may not apply.\n`);
-  } else if (sourceFit.tier === 'tight') {
-    console.log(
-      `\n· ${sourceModel} is tight on ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}) — start with modest num_ctx.\n`,
-    );
-  }
-
-  const { newName: rawNewName } = await prompt([
-    {
-      type: 'input',
-      name: 'newName',
-      message: 'New model name (e.g. gemma4-fast):',
-      initial: sourceModel.split(':')[0] + '-finetuna',
-      validate: (i) => {
-        if (!i || !i.trim()) return 'Name cannot be empty';
-        if (!/^[a-zA-Z0-9_:.-]+$/.test(i.trim())) return 'Only letters, numbers, -, _, ., : are allowed';
-        return true;
+  let sourceModel;
+  if (FLAGS.model) {
+    sourceModel = sanitizeName(FLAGS.model.trim());
+    const bare = sourceModel.replace(/:latest$/, '');
+    const known = models.some((n) => n === sourceModel || n === `${bare}:latest` || n.replace(/:latest$/, '') === bare);
+    if (!known && !FLAGS.json) {
+      console.log(`⚠️  ${sourceModel} not in local list — continuing anyway (Ollama may still resolve it).\n`);
+    }
+  } else if (canPrompt()) {
+    ({ sourceModel } = await prompt([
+      {
+        type: 'select',
+        name: 'sourceModel',
+        message: 'Which model shall we season and release into the shoal? 🐟',
+        choices: modelChoices,
       },
-    },
-  ]);
-  const newName = sanitizeName(rawNewName.trim());
+    ]));
+  } else {
+    requireFlag(null, '--model', 'required when stdin is not a TTY');
+  }
+
+  let sourceMeta = tagsByName.get(sourceModel) || tagsByName.get(sourceModel.replace(/:latest$/, '')) || null;
+  if (!sourceMeta) {
+    try {
+      sourceMeta = await fetchModelShow(sourceModel);
+    } catch {
+      /* optional */
+    }
+  }
+  if (isEmbeddingOnly(sourceMeta)) {
+    console.error(`${sourceModel} is embedding-only — Finetuna needs a generative model.`);
+    process.exit(1);
+  }
+
+  const sourceFit = classifyModelFit(sourceModel, sourceMeta, vramGB, { freeGB: vramFreeGB, unified: isUnified });
+  if (!FLAGS.json) {
+    if (sourceFit.tier === 'wont_fit') {
+      console.log(`\n⚠️  ${sourceModel} looks too large for ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}).`);
+      console.log(
+        isUnified
+          ? '   You can continue, but expect pressure/OOM — free RAM or pick a smaller sibling.\n'
+          : '   You can continue, but expect load OOM — free VRAM or pick a smaller sibling.\n',
+      );
+    } else if (sourceFit.tier === 'cloud') {
+      console.log(`\n⚠️  ${sourceModel} looks like a cloud/remote model — local GPU tuning may not apply.\n`);
+    } else if (sourceFit.tier === 'tight') {
+      console.log(
+        `\n· ${sourceModel} is tight on ~${vramFreeGB ?? vramGB}GB available (${sourceFit.hint}) — start with modest num_ctx.\n`,
+      );
+    }
+  }
+
+  let newName;
+  if (FLAGS.name) {
+    newName = sanitizeName(FLAGS.name.trim());
+  } else if (canPrompt()) {
+    const { newName: rawNewName } = await prompt([
+      {
+        type: 'input',
+        name: 'newName',
+        message: 'New model name (e.g. gemma4-fast):',
+        initial: sourceModel.split(':')[0] + '-finetuna',
+        validate: (i) => {
+          if (!i || !i.trim()) return 'Name cannot be empty';
+          if (!/^[a-zA-Z0-9_:.-]+$/.test(i.trim())) return 'Only letters, numbers, -, _, ., : are allowed';
+          return true;
+        },
+      },
+    ]);
+    newName = sanitizeName(rawNewName.trim());
+  } else {
+    requireFlag(null, '--name', 'required when stdin is not a TTY');
+  }
 
   if (wantsAgent64kCtx()) {
     const who = FLAGS.clientPreset === 'hermes' ? 'Hermes' : 'OpenClaw';
@@ -2420,57 +2626,90 @@ async function main() {
       : FLAGS.clientPreset === 'continue'
         ? '16384'
         : '32768';
-  const { ctxChoice } = await prompt([
-    {
-      type: 'select',
-      name: 'ctxChoice',
-      message: ctxMessage,
-      choices: ctxOptions,
-      initial: ctxInitial,
-    },
-  ]);
 
-  const rawCtx = unwrapChoice(ctxChoice);
-  let numCtx =
-    rawCtx === 'custom'
-      ? parseInt(
-          (await prompt([
-            {
-              type: 'input',
-              name: 'customCtx',
-              message: 'Custom context size (any number):',
-              initial: customCtxInitial,
-            },
-          ])).customCtx,
-          10,
-        )
-      : rawCtx;
+  let numCtx;
+  if (FLAGS.ctx != null && Number.isFinite(FLAGS.ctx)) {
+    numCtx = FLAGS.ctx;
+  } else if (canPrompt()) {
+    const { ctxChoice } = await prompt([
+      {
+        type: 'select',
+        name: 'ctxChoice',
+        message: ctxMessage,
+        choices: ctxOptions,
+        initial: ctxInitial,
+      },
+    ]);
+    const rawCtx = unwrapChoice(ctxChoice);
+    numCtx =
+      rawCtx === 'custom'
+        ? parseInt(
+            (
+              await prompt([
+                {
+                  type: 'input',
+                  name: 'customCtx',
+                  message: 'Custom context size (any number):',
+                  initial: customCtxInitial,
+                },
+              ])
+            ).customCtx,
+            10,
+          )
+        : rawCtx;
+  } else if (wantsAgent64kCtx()) {
+    numCtx = 65536;
+  } else if (FLAGS.clientPreset === 'continue') {
+    numCtx = 16384;
+  } else if (FLAGS.maxVram) {
+    numCtx = remoteOllama ? 131072 : maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB);
+  } else {
+    requireFlag(FLAGS.ctx, '--ctx', 'required when stdin is not a TTY (or pass a client preset)');
+  }
   if (!Number.isFinite(numCtx) || numCtx < 256) {
     console.error('Invalid context size; using 8192.');
     numCtx = 8192;
   }
 
-  const { numBatch } = await prompt([
-    {
-      type: 'input',
-      name: 'numBatch',
-      message: 'Batch size (num_batch) – higher often helps prompt eval / TTFT (not generation TPS):',
-      initial: '512',
-    },
-  ]);
-  const { numGpu } = await prompt([{ type: 'input', name: 'numGpu', message: 'GPU layers (num_gpu) – 999 = max possible:', initial: '999' }]);
+  let numBatch;
+  let numGpu;
+  if (FLAGS.batch != null && Number.isFinite(FLAGS.batch)) {
+    numBatch = String(FLAGS.batch);
+  } else if (canPrompt()) {
+    ({ numBatch } = await prompt([
+      {
+        type: 'input',
+        name: 'numBatch',
+        message: 'Batch size (num_batch) – higher often helps prompt eval / TTFT (not generation TPS):',
+        initial: '512',
+      },
+    ]));
+  } else {
+    numBatch = '512';
+  }
+  if (FLAGS.gpuLayers != null && Number.isFinite(FLAGS.gpuLayers)) {
+    numGpu = String(FLAGS.gpuLayers);
+  } else if (canPrompt()) {
+    ({ numGpu } = await prompt([
+      { type: 'input', name: 'numGpu', message: 'GPU layers (num_gpu) – 999 = max possible:', initial: '999' },
+    ]));
+  } else {
+    numGpu = '999';
+  }
 
   if (FLAGS.flashAttn === true) {
     sessionFlashAttn = true;
-    printFlashAttnGuidance();
+    if (!FLAGS.json) printFlashAttnGuidance();
   } else if (FLAGS.flashAttn === false) {
     sessionFlashAttn = false;
   } else if (isFlashAttnEnvEnabled()) {
     sessionFlashAttn = true;
-    console.log(
-      'OLLAMA_FLASH_ATTENTION is set in *this* process environment (may not match a remote/systemd Ollama server).\n',
-    );
-  } else if (flashSupported) {
+    if (!FLAGS.json) {
+      console.log(
+        'OLLAMA_FLASH_ATTENTION is set in *this* process environment (may not match a remote/systemd Ollama server).\n',
+      );
+    }
+  } else if (flashSupported && canPrompt()) {
     const r = await prompt([
       {
         type: 'confirm',
@@ -2572,6 +2811,10 @@ async function main() {
         }
         lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
 
+        if (!canPrompt()) {
+          console.error('Load OOM in non-interactive mode — re-run with a lower --ctx.');
+          process.exit(1);
+        }
         const { reduce } = await prompt([
           {
             type: 'confirm',
@@ -2652,7 +2895,7 @@ async function main() {
   if (!measuredSinceCreate) {
     console.log('\n⚠️  Skipping auto-tune until the model loads.');
     autoTune = false;
-  } else if (!autoTune) {
+  } else if (!autoTune && canPrompt()) {
     const r = await prompt([
       {
         type: 'confirm',
@@ -2666,8 +2909,13 @@ async function main() {
 
   if (autoTune) {
     const defaultRepeats = FLAGS.benchRepeats;
-    const { repeats } = await prompt([{ type: 'input', name: 'repeats', message: 'Benchmark repeats per candidate:', initial: String(defaultRepeats) }]);
-    const repeatCount = parseInt(repeats, 10) || defaultRepeats;
+    let repeatCount = defaultRepeats;
+    if (canPrompt()) {
+      const { repeats } = await prompt([
+        { type: 'input', name: 'repeats', message: 'Benchmark repeats per candidate:', initial: String(defaultRepeats) },
+      ]);
+      repeatCount = parseInt(repeats, 10) || defaultRepeats;
+    }
     const currentBatch = parseInt(numBatch, 10) || 512;
     bestBatch = currentBatch;
     let bestCtx = currentCtx;
@@ -2778,7 +3026,7 @@ async function main() {
       let ctxGoal = 'max-context';
       if (FLAGS.maxVram) {
         console.log('🎯 --max-vram: optimizing for largest context that still fits dedicated VRAM.\n');
-      } else {
+      } else if (canPrompt()) {
         const r = await prompt([
           {
             type: 'select',
@@ -3007,14 +3255,19 @@ async function main() {
           ? '   Context grew — a modest speed drop can still be a good trade.'
           : '   You can keep these settings or revert to your pre-tune baseline.',
       );
-      const { keepTuned } = await prompt([
-        {
-          type: 'confirm',
-          name: 'keepTuned',
-          message: `Keep tuned settings (batch ${bestBatch}, ctx ${bestCtx})? (No = revert to batch ${baselineBatch}, ctx ${baselineCtx})`,
-          initial: grewCtx,
-        },
-      ]);
+      let keepTuned = grewCtx || !canPrompt();
+      if (canPrompt()) {
+        ({ keepTuned } = await prompt([
+          {
+            type: 'confirm',
+            name: 'keepTuned',
+            message: `Keep tuned settings (batch ${bestBatch}, ctx ${bestCtx})? (No = revert to batch ${baselineBatch}, ctx ${baselineCtx})`,
+            initial: grewCtx,
+          },
+        ]));
+      } else if (!FLAGS.json) {
+        console.log(`   Non-interactive: ${keepTuned ? 'keeping' : 'reverting'} tuned settings.`);
+      }
       if (!keepTuned) {
         bestBatch = baselineBatch;
         bestCtx = baselineCtx;
@@ -3086,6 +3339,10 @@ async function main() {
     fullGPU = await checkGPUFit(newName, { unified: isUnified });
 
     if (!fullGPU) {
+      if (!canPrompt()) {
+        console.error('Model not fully on GPU in non-interactive mode — re-run with a lower --ctx.');
+        process.exit(1);
+      }
       const { reduce } = await prompt([
         { type: 'confirm', name: 'reduce', message: 'Would you like to drop the context window to get full GPU offload? 🐠', initial: true },
       ]);

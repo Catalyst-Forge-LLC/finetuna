@@ -115,8 +115,9 @@ Override the data directory with `FINETUNA_DIR`. `--reload` reads state from tha
 ```bash
 finetuna --check              # report fit / context headroom (no create)
 finetuna --check --model llama3.2 --json
+finetuna --verify my-model-ctx32k
+finetuna --model llama3.2 --name llama3.2-ft --ctx 32768 --auto-tune   # non-interactive
 finetuna                      # interactive create
-finetuna --auto-tune
 ```
 
 Common invocations:
@@ -137,7 +138,10 @@ finetuna --help
 | Flag | Purpose |
 |------|---------|
 | `--check` / `--dry-run` | Report memory, soft context guide, and model fit hints — **no** `ollama create` |
-| `--model <name>` | Focus `--check` (or scripting) on one model |
+| `--verify <name>` | Re-check GPU-fit for an existing model (after driver/Ollama/app drift) |
+| `--model <name>` | Source model (`--check` focus, or non-interactive create) |
+| `--name <name>` | New model name (non-interactive create; requires `--model`) |
+| `--ctx` / `--batch` / `--gpu` | Non-interactive `num_ctx` / `num_batch` / `num_gpu` |
 | `--json` | Emit a machine-readable JSON report (stdout) |
 | `--auto-tune` | Run batch/context benchmarks without the confirm prompt |
 | `--skip-batch` / `--skip-ctx` | Skip Phase 1 or Phase 2 of auto-tune |

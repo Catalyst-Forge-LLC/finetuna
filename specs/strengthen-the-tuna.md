@@ -316,20 +316,22 @@ Ship **1–2** before anything else. Rest lands incrementally.
 - `2026-08-10:` **Steps 1–2 landed:** `lib/bench-stats.js`; median/spread selection; pinned gen benches; `pnpm test`.
 - `2026-08-10:` **Steps 3–4 landed:** P1-2 `/api/ps` fit; P1-1 remote host gating.
 - `2026-08-10:` **Step 5 landed:** P0-3 paths + `bin` / `1.1.0`.
-- `2026-08-10:` **Steps 6–7 (partial) landed:** P2 framing (README + banner tagline); `--check`/`--dry-run`, `--model`, `--json`. Remaining P2: non-interactive create, `--verify`, capability filter.
+- `2026-08-10:` **Steps 6–7 landed:** P2 framing; `--check`/`--json`; `--verify`; non-interactive `--model/--name/--ctx/--batch/--gpu`; embedding-only filter via capabilities.
 
 ---
 
 ## 10. Implementation summary
 
-**Implemented:** _(in progress — through P2 framing + --check/--json)_
+**Implemented:** _(in progress — P2 feature set complete; P1-3 + M5 remain)_
 
 1. Credibility helpers + pinned benches + selection tests  
 2. `/api/ps` fit + remote host gating  
 3. Installable CLI paths + `bin` @ **1.1.0**  
-4. Fit-first README/banner/tagline (GitHub description updated)  
-5. `--check` / `--dry-run`, `--model`, `--json`  
+4. Fit-first README/banner/tagline  
+5. `--check` / `--json` / `--verify`  
+6. Non-interactive create (`--model --name --ctx …`, TTY prompts only when needed)  
+7. Embedding-only models filtered from picker (`lib/capabilities.js`)  
 
-**Still open in P2:** non-interactive create, `--verify`, capability filter.  
+**Still open:** P1-3 Phase 1 earn-runtime; M5 shared bench-stats.  
 
-**Verification:** `pnpm test` (31). Maintainer publishes.
+**Verification:** `pnpm test` (36). Maintainer publishes.

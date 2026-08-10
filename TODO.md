@@ -11,9 +11,9 @@
 
 **[specs/strengthen-the-tuna.md](./specs/strengthen-the-tuna.md)** — single source of truth (merged reliability + framing specs).
 
-**Done (steps 1–7 partial):** Credibility; `/api/ps` fit; remote; packaging `1.1.0`; framing; `--check`/`--json`. **You publish** when ready: `pnpm publish --access public`.
+**Done (steps 1–7):** Credibility; remote/`/api/ps`; packaging `1.1.0`; framing; `--check`/`--json`/`--verify`; non-interactive create; embedding filter. **You publish** when ready: `pnpm publish --access public`.
 
-**Next:** `--verify` / non-interactive `--model --ctx --name` / capability filter → Phase 1 earn-runtime → shared `ollama-bench-stats`.
+**Next:** P1-3 Phase 1 earn-runtime (measure → keep or `--tune-batch`) → M5 shared `ollama-bench-stats`.
 
 ## Lower priority / ideas
 
