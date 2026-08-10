@@ -7,13 +7,19 @@
 - **No `curl` for API calls** — benchmarks and GPU-fit loading use `fetch` (Node 18+).
 - **VRAM** — AMD path via `rocm-smi --showmeminfo vram`; clearer message when detection fails.
 
-## Active spec
+## Active spec — Finetuna 1.1
 
-- **[Auto-tune reliability, remote host, packaging](./specs/auto-tune-reliability-remote-packaging.md)** — M1 selection first (median+spread, **D8** max-context not-significantly-slower, **`num_predict: 256`**). Then M2 remote/`/api/ps`, M3 bin + `~/.finetuna/` + publish tee-up (**you** publish `finetuna` — name is free), M4 tests, M5 shared `ollama-bench-stats` with ollanet.
-- **Still decide before M3:** installed Modelfile path — cwd vs `~/.finetuna/` vs home+`--modelfile` (tradeoffs in spec §5.5).
+**[specs/strengthen-the-tuna.md](./specs/strengthen-the-tuna.md)** — single source of truth (merged reliability + framing specs).
+
+**Start here (build order steps 1–2):**
+
+1. **P0-1 + P0-2** — median/spread/challenger rule; `num_predict: 256`; long prompt + seed; exclude non-`length` samples.
+2. **P3 (partial)** — mock harness + selection tests.
+
+Then: `/api/ps` fit → remote probe skip → paths/`bin`/publish tee-up → README framing → `--dry-run`/`--json` → Phase 1 earn-runtime → shared `ollama-bench-stats`.
+
+**Locked for packaging:** installed Modelfile stays in **cwd** (print absolute path); state/results under `~/.finetuna/` (`FINETUNA_DIR`). Maintainer publishes `finetuna@1.1.0` (name is free).
 
 ## Lower priority / ideas
 
 - **OpenClaw mode** is hardcoded to `gemma4` renderer/parser; support other families or `ollama show --modelfile` merge when needed.
-
-- **Tests / bin / remote GPU** — superseded by the active spec above (M2–M4).
