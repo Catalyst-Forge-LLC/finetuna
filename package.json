@@ -28,11 +28,13 @@
   ],
   "files": [
     "finetuna.js",
+    "lib",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "start": "node finetuna.js"
+    "start": "node finetuna.js",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "ansi-colors": "^4.1.3",

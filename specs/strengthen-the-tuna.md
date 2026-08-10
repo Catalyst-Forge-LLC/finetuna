@@ -1,7 +1,7 @@
 # Spec: Finetuna 1.1 — credibility, packaging, and framing
 
 **Spec kind:** Delivery  
-**Status:** Draft (ready to implement)  
+**Status:** Partial  
 **Target:** `1.1.0`  
 **Date:** 2026-08-10  
 **Surfaces:** `finetuna.js`, `package.json`, `README.md`, `TODO.md`, `lib/bench-stats.js` (or equivalent), `test/*`  
@@ -312,12 +312,18 @@ Ship **1–2** before anything else. Rest lands incrementally.
 ## 9. Progress
 
 - `2026-08-10:` Reliability spec drafted from external review; D8–D11 locked.
-- `2026-08-10:` Merged [strengthen-the-tuna.md](./strengthen-the-tuna.md) framing + P1-3 / P2 features / build order with reliability decisions; **D12** Modelfile = Option A; challenger rule uses relative gain + `MIN_WIN_PCT`; non-`length` samples excluded.
+- `2026-08-10:` Merged framing + build order; **D12** Modelfile = Option A.
+- `2026-08-10:` **Steps 1–2 landed:** `lib/bench-stats.js` (median/spread/challenger/max-context); benchmarks return summaries with `samples[]`; gen bench uses `LONG_PROMPT` + `num_predict: 256` + seed; non-`length` samples excluded; Phase 1/2 tables show median+spread; `pnpm test` (13 cases). Next: P1-2 `/api/ps` fit.
 
 ---
 
 ## 10. Implementation summary
 
-**Implemented:** _(empty until completed)_
+**Implemented:** _(in progress — P0-1, P0-2, P3 partial)_
 
-**Verification:** `pnpm test`; manual idle double `--auto-tune`; remote `OLLAMA_HOST` smoke; `npm pack --dry-run` before publish.
+1. `lib/bench-stats.js` — pure median/spread/significance helpers  
+2. Auto-tune selection uses challenger rule + D8 max-context  
+3. Gen bench: long prompt, `num_predict` 256, seed 42, exclude non-`length`  
+4. `test/bench-stats.test.mjs` — 13 unit tests  
+
+**Verification:** `pnpm test` (pass). Manual idle double `--auto-tune` still recommended.

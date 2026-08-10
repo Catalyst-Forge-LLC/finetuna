@@ -11,12 +11,9 @@
 
 **[specs/strengthen-the-tuna.md](./specs/strengthen-the-tuna.md)** — single source of truth (merged reliability + framing specs).
 
-**Start here (build order steps 1–2):**
+**Done (steps 1–2):** P0-1 + P0-2 + P3 selection tests — `lib/bench-stats.js`, median/spread challenger rule, `num_predict: 256`, long prompt + seed, exclude non-`length`, `pnpm test`.
 
-1. **P0-1 + P0-2** — median/spread/challenger rule; `num_predict: 256`; long prompt + seed; exclude non-`length` samples.
-2. **P3 (partial)** — mock harness + selection tests.
-
-Then: `/api/ps` fit → remote probe skip → paths/`bin`/publish tee-up → README framing → `--dry-run`/`--json` → Phase 1 earn-runtime → shared `ollama-bench-stats`.
+**Next:** P1-2 `/api/ps` fit → P1-1 remote probe skip → P0-3 paths/`bin`/publish → README framing → `--dry-run`/`--json` → Phase 1 earn-runtime → shared `ollama-bench-stats`.
 
 **Locked for packaging:** installed Modelfile stays in **cwd** (print absolute path); state/results under `~/.finetuna/` (`FINETUNA_DIR`). Maintainer publishes `finetuna@1.1.0` (name is free).
 

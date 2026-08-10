@@ -3,6 +3,14 @@ import { createRequire } from 'module';
 import { execSync, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import {
+  MIN_WIN_PCT,
+  summarizeRates,
+  pickSignificantWinner,
+  pickMaxContext,
+  formatSpreadPct,
+  formatNoSignificantMessage,
+} from './lib/bench-stats.js';
 
 const require = createRequire(import.meta.url);
 const colors = require('ansi-colors');
@@ -59,8 +67,16 @@ function parseFlags() {
 
   const flags = {
     timeoutMs: process.env.FINETUNA_TIMEOUT ? parseInt(process.env.FINETUNA_TIMEOUT, 10) : 20000,
-    genTimeoutMs: process.env.FINETUNA_GEN_TIMEOUT ? parseInt(process.env.FINETUNA_GEN_TIMEOUT, 10) : 60000,
+    genTimeoutMs: process.env.FINETUNA_GEN_TIMEOUT ? parseInt(process.env.FINETUNA_GEN_TIMEOUT, 10) : 120000,
     benchRepeats: process.env.BENCH_REPEATS ? parseInt(process.env.BENCH_REPEATS, 10) : 3,
+    numPredict: (() => {
+      const n = process.env.FINETUNA_NUM_PREDICT ? parseInt(process.env.FINETUNA_NUM_PREDICT, 10) : 256;
+      return Number.isFinite(n) && n > 0 ? n : 256;
+    })(),
+    benchSeed: (() => {
+      const n = process.env.FINETUNA_BENCH_SEED ? parseInt(process.env.FINETUNA_BENCH_SEED, 10) : 42;
+      return Number.isFinite(n) ? n : 42;
+    })(),
     autoTune: false,
     verbose: false,
     skipBatch: false,
@@ -91,7 +107,7 @@ function parseFlags() {
           '',
           'Options:',
           '  --timeout <ms>        Prompt-eval / API timeout (default: 20000)',
-          '  --gen-timeout <ms>    Generation benchmark timeout (default: 60000)',
+          '  --gen-timeout <ms>    Generation benchmark timeout (default: 120000)',
           '  --bench-repeats <N>   Benchmark repeats per candidate (default: 3)',
           '  --auto-tune           Skip auto-tune confirmation prompt',
           '  --skip-batch          Skip Phase 1 (num_batch sweep)',
@@ -121,6 +137,8 @@ function parseFlags() {
           '  FINETUNA_TIMEOUT      Same as --timeout',
           '  FINETUNA_GEN_TIMEOUT  Same as --gen-timeout',
           '  BENCH_REPEATS         Same as --bench-repeats',
+          '  FINETUNA_NUM_PREDICT  Generation bench token cap (default 256)',
+          '  FINETUNA_BENCH_SEED   Fixed seed for comparable bench repeats (default 42)',
         ].join('\n'),
       );
       process.exit(0);
@@ -1569,12 +1587,15 @@ Remember: every sentence should be more absurd than the last. The goal is maximu
 async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {}) {
   // think:false must be top-level (not inside options) or thinking models (e.g. qwen3.5)
   // burn num_predict on CoT and return empty/useless generation metrics.
+  // Long prompt + num_predict so the cap binds (done_reason === 'length'); fixed seed for repeats.
+  const numPredict = opts.numPredict ?? FLAGS.numPredict;
+  const seed = opts.seed ?? FLAGS.benchSeed;
   const body = {
     model: newName,
-    prompt: 'Tell me a short, fun fact about AI. Reply in one or two sentences.',
+    prompt: LONG_PROMPT,
     stream: false,
     think: false,
-    options: { num_predict: 80, ...(opts.runner || {}) },
+    options: { num_predict: numPredict, seed, ...(opts.runner || {}) },
   };
   const runUrl = `${OLLAMA_BASE}/api/generate`;
   const skipCliFallback = Boolean(opts.skipCliFallback);
@@ -1652,6 +1673,8 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {
     const evalDurationMs = (data.eval_duration || 0) / 1_000_000;
     const totalTimeSec = (end - start) / 1000;
     const { evalRate, promptEvalRate } = ratesFromGenerateData(data);
+    const doneReason = data.done_reason != null ? String(data.done_reason) : null;
+    const capBound = doneReason === 'length';
     const tpsEval =
       evalRate != null ? evalRate.toFixed(1) : tokensGenerated && evalDurationMs ? (tokensGenerated / (evalDurationMs / 1000)).toFixed(1) : 'N/A';
     const tpsWall = tokensGenerated && totalTimeSec ? (tokensGenerated / totalTimeSec).toFixed(1) : 'N/A';
@@ -1666,6 +1689,9 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {
         totalTimeSec,
         evalRate,
         promptEvalRate,
+        doneReason,
+        capBound,
+        numPredict,
         noRateMetrics: tokensGenerated === 0 || tpsEval === 'N/A',
       },
       start,
@@ -1711,12 +1737,13 @@ async function getSpeedMetrics(newName, timeoutMs = FLAGS.genTimeoutMs, opts = {
 
 // Measures prompt-eval speed (TTFT) using a long prompt — this is what num_batch actually affects
 async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs, opts = {}) {
+  const seed = opts.seed ?? FLAGS.benchSeed;
   const body = {
     model: newName,
     prompt: LONG_PROMPT,
     stream: false,
     think: false,
-    options: { num_predict: 1, ...(opts.runner || {}) },
+    options: { num_predict: 1, seed, ...(opts.runner || {}) },
   };
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
@@ -1758,55 +1785,76 @@ async function getPromptEvalMetrics(newName, timeoutMs = FLAGS.timeoutMs, opts =
   }
 }
 
-// Benchmark prompt-eval / TTFT over N repeats
+/** Single-sample summary (e.g. reused baseline). Uses MIN_WIN_PCT as spread stand-in when n<2. */
+function summaryFromSingleRate(rate) {
+  const summary = summarizeRates(rate > 0 ? [rate] : []);
+  if (summary.ok) summary.spreadPct = MIN_WIN_PCT;
+  return summary;
+}
+
+function printBenchSummaryLine(summary, { unit = 't/s', note = '' } = {}) {
+  if (!summary.ok) {
+    console.log(`   ── failed (${summary.failedRuns != null ? summary.failedRuns : 'all'} runs)${note}`);
+    return;
+  }
+  const spread = formatSpreadPct(summary.spreadPct);
+  console.log(
+    `   ── min ${summary.min.toFixed(1)} / median ${summary.median.toFixed(1)} / max ${summary.max.toFixed(1)} ${unit}` +
+      ` (spread ${spread}, n=${summary.n}${summary.failedRuns ? `, ${summary.failedRuns} excluded` : ''})${note}`,
+  );
+}
+
+// Benchmark prompt-eval / TTFT over N repeats → median/spread summary (not bare mean).
 async function benchmarkPromptEval(newName, repeats = FLAGS.benchRepeats, label = '', runner = null) {
-  const results = [];
+  const samples = [];
+  let failedRuns = 0;
   for (let i = 0; i < repeats; i++) {
     process.stdout.write(`   ${label}Run ${i + 1}/${repeats}… `);
     const m = await getPromptEvalMetrics(newName, FLAGS.timeoutMs, { runner: runner || undefined });
     const tps = m.success ? (m.promptEvalRate ?? (m.promptTps !== 'N/A' ? parseFloat(m.promptTps) : 0)) : 0;
     if (m.success && tps > 0) {
-      results.push(tps);
+      samples.push(tps);
       const rateStr = m.promptEvalRate != null ? `${m.promptEvalRate.toFixed(1)} prompt_eval_rate` : `${tps.toFixed(1)} tok/s ingestion`;
       console.log(`${rateStr} · ${m.ttftMs.toFixed(0)}ms to first token · ${m.promptTokens} prompt tokens`);
     } else {
-      results.push(0);
+      failedRuns++;
       console.log('failed');
     }
     if (i < repeats - 1) await sleep(300);
   }
-  const valid = results.filter((r) => r > 0);
-  const sum = valid.reduce((a, b) => a + b, 0);
-  const avg = valid.length ? sum / valid.length : 0;
-  const min = valid.length ? Math.min(...valid) : 0;
-  const max = valid.length ? Math.max(...valid) : 0;
-  console.log(`   ── min ${min.toFixed(1)} / avg ${avg.toFixed(1)} / max ${max.toFixed(1)} tok/s (prompt ingestion speed)`);
-  return avg;
+  const summary = { ...summarizeRates(samples), failedRuns };
+  printBenchSummaryLine(summary, { unit: 'tok/s', note: ' prompt ingestion' });
+  return summary;
 }
 
+// Generation TPS over N repeats. Only done_reason===length samples count toward the median.
 async function benchmarkModel(newName, repeats = FLAGS.benchRepeats, label = '', runner = null) {
-  const results = [];
+  const samples = [];
+  let failedRuns = 0;
   for (let i = 0; i < repeats; i++) {
     process.stdout.write(`   ${label}Run ${i + 1}/${repeats}… `);
     const m = await getSpeedMetrics(newName, FLAGS.genTimeoutMs, { runner: runner || undefined });
     const tps = m.success ? (m.evalRate ?? (m.tpsEval !== 'N/A' ? parseFloat(m.tpsEval) : m.tpsWall !== 'N/A' ? parseFloat(m.tpsWall) : 0)) : 0;
-    if (m.success && tps > 0) {
-      results.push(tps);
-      const rateStr = m.evalRate != null ? `${m.evalRate.toFixed(1)} eval_rate` : `${tps.toFixed(1)} t/s`;
-      console.log(rateStr);
-    } else {
-      results.push(0);
+    if (!m.success || !(tps > 0)) {
+      failedRuns++;
       console.log('failed');
+    } else if (!m.capBound) {
+      failedRuns++;
+      const why = m.doneReason ? `done_reason=${m.doneReason}` : 'cap did not bind';
+      console.log(`excluded (${why}, ${m.tokensGenerated || 0}/${m.numPredict ?? FLAGS.numPredict} tokens)`);
+      if (FLAGS.verbose) {
+        console.log(`   [verbose] Sample excluded from comparison — need done_reason=length for stable decode rates.`);
+      }
+    } else {
+      samples.push(tps);
+      const rateStr = m.evalRate != null ? `${m.evalRate.toFixed(1)} eval_rate` : `${tps.toFixed(1)} t/s`;
+      console.log(`${rateStr} (length)`);
     }
     if (i < repeats - 1) await sleep(400);
   }
-  const valid = results.filter((r) => r > 0);
-  const sum = valid.reduce((a, b) => a + b, 0);
-  const avg = valid.length ? sum / valid.length : 0;
-  const min = valid.length ? Math.min(...valid) : 0;
-  const max = valid.length ? Math.max(...valid) : 0;
-  console.log(`   ── min ${min.toFixed(1)} / avg ${avg.toFixed(1)} / max ${max.toFixed(1)} t/s`);
-  return avg;
+  const summary = { ...summarizeRates(samples), failedRuns };
+  printBenchSummaryLine(summary);
+  return summary;
 }
 
 async function sampleBenchmarkRates(newName, runner = null) {
@@ -2362,43 +2410,56 @@ async function main() {
         // Reuse baseline prompt-eval for the original batch (already measured).
         if (cand === currentBatch && beforeMetrics?.promptEvalRate > 0) {
           console.log(`   Reusing baseline prompt-eval (${beforeMetrics.promptEvalRate.toFixed(1)} t/s) — skip re-bench`);
-          batchResults.push({ cand, avg: beforeMetrics.promptEvalRate, gpu: true, reused: true });
+          const summary = summaryFromSingleRate(beforeMetrics.promptEvalRate);
+          batchResults.push({ cand, gpu: true, reused: true, ...summary });
           continue;
         }
 
         const gpuOk = await checkGPUFit(newName, { unified: isUnified, runner });
         if (!gpuOk) {
           console.log(`   ⚠️  num_batch=${cand} not confirmed ${fitLabel} — skipping`);
-          batchResults.push({ cand, avg: 0, gpu: false });
+          batchResults.push({ cand, gpu: false, ...summarizeRates([]), failedRuns: repeatCount });
           continue;
         }
 
-        const avg = await benchmarkPromptEval(newName, repeatCount, `[batch=${cand}] `, runner);
-        batchResults.push({ cand, avg, gpu: true });
+        const summary = await benchmarkPromptEval(newName, repeatCount, `[batch=${cand}] `, runner);
+        batchResults.push({ cand, gpu: true, ...summary });
       }
 
-      batchResults.sort((a, b) => b.avg - a.avg);
-      console.log('\n┌──────────────────────────────────────────────────────────┐');
-      console.log('│    🐟 Phase 1: num_batch Results (prompt eval t/s)       │');
-      console.log('├──────────────┬────────────────┬──────────┬───────────────┤');
-      console.log('│  num_batch   │  prompt eval   │  GPU fit │               │');
-      console.log('│              │  avg t/s       │          │               │');
-      console.log('├──────────────┼────────────────┼──────────┼───────────────┤');
-      for (let i = 0; i < batchResults.length; i++) {
-        const r = batchResults[i];
+      const batchPick = pickSignificantWinner(currentBatch, batchResults, { preferSmallerOnTie: true });
+      bestBatch = batchPick.winner;
+
+      console.log('\n┌────────────────────────────────────────────────────────────────────┐');
+      console.log('│    🐟 Phase 1: num_batch Results (prompt eval median t/s)         │');
+      console.log('├──────────────┬────────────┬──────────┬──────────┬────────────────┤');
+      console.log('│  num_batch   │  median    │  spread  │  GPU fit │                │');
+      console.log('├──────────────┼────────────┼──────────┼──────────┼────────────────┤');
+      const batchDisplay = [...batchResults].sort((a, b) => a.cand - b.cand);
+      for (const r of batchDisplay) {
         const gpuStr = r.gpu ? '  100%  ' : '  ✗     ';
-        const validResults = batchResults.filter((b) => b.gpu && b.avg > 0);
-        validResults.sort((a, b) => b.avg - a.avg);
-        const tag = validResults[0]?.cand === r.cand && r.gpu ? ' ◀ best' : r.cand === currentBatch ? ' (original)' : !r.gpu ? ' skipped' : '';
-        console.log(`│  ${String(r.cand).padStart(10)} │ ${(r.avg > 0 ? r.avg.toFixed(1) : '—').padStart(14)} │ ${gpuStr} │ ${tag.padEnd(13)} │`);
+        let tag = '';
+        if (r.cand === bestBatch && r.ok) tag = ' ◀ chosen';
+        else if (r.cand === currentBatch) tag = ' (original)';
+        else if (!r.gpu) tag = ' skipped';
+        else if (!r.ok) tag = ' failed';
+        console.log(
+          `│  ${String(r.cand).padStart(10)} │ ${(r.ok ? r.median.toFixed(1) : '—').padStart(10)} │ ${formatSpreadPct(r.spreadPct).padStart(8)} │ ${gpuStr} │ ${tag.padEnd(14)} │`,
+        );
       }
-      console.log('└──────────────┴────────────────┴──────────┴───────────────┘');
+      console.log('└──────────────┴────────────┴──────────┴──────────┴────────────────┘');
 
-      bestBatch = batchResults.filter((b) => b.gpu && b.avg > 0).sort((a, b) => b.avg - a.avg)[0]?.cand || currentBatch;
-      if (bestBatch !== currentBatch) {
-        console.log(`\n   ✅ Best batch size: ${bestBatch} (was ${currentBatch})`);
+      if (batchPick.switched) {
+        console.log(`\n   ✅ Significant win — batch size ${bestBatch} (was ${currentBatch})`);
       } else {
-        console.log(`\n   ✅ Original batch size ${currentBatch} confirmed as best.`);
+        const inc = batchResults.find((r) => r.cand === currentBatch);
+        const topChallenger = batchResults
+          .filter((r) => r.gpu && r.ok && r.cand !== currentBatch)
+          .sort((a, b) => b.median - a.median)[0];
+        if (inc?.ok) {
+          console.log(`\n   ${formatNoSignificantMessage(currentBatch, inc, topChallenger || null)}`);
+        } else {
+          console.log(`\n   ✅ Keeping original batch size ${currentBatch}.`);
+        }
       }
     } else {
       console.log('  Skipping Phase 1 (--skip-batch).');
@@ -2407,10 +2468,13 @@ async function main() {
     if (!FLAGS.skipCtx) {
       // ── Phase 2: num_ctx sweep (measures generation TPS + GPU fit) ──
       console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('  Phase 2: num_ctx sweep (generation TPS + GPU fit)');
+      console.log('  Phase 2: num_ctx sweep (fit search + generation TPS)');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('  num_ctx is the biggest lever for generation speed.');
+      console.log('  Primary: largest context that stays on the GPU; speed is secondary.');
       console.log(`  Testing context sizes — skipping any that won't fit ${fitLabel}.`);
+      console.log(
+        `  Gen bench: num_predict=${FLAGS.numPredict}, seed=${FLAGS.benchSeed} (only done_reason=length counts).`,
+      );
       console.log('  Fast path: probe via /api/generate options (no ollama create until the end).\n');
 
       let ctxGoal = 'max-context';
@@ -2449,27 +2513,29 @@ async function main() {
         const runner = runnerOptions({ numCtx: cand, numBatch: bestBatch, numGpu });
 
         // Reuse baseline gen rate when probing the original ctx+batch combo.
+        // Only reuse if the baseline itself bound the length cap (comparable sample).
         if (cand === baselineCtx && bestBatch === baselineBatch && beforeMetrics?.success) {
           const reused =
             beforeMetrics.evalRate ??
             (beforeMetrics.tpsEval !== 'N/A' ? parseFloat(beforeMetrics.tpsEval) : NaN);
-          if (Number.isFinite(reused) && reused > 0) {
+          if (Number.isFinite(reused) && reused > 0 && beforeMetrics.capBound !== false) {
             console.log(`   Reusing baseline generation rate (${reused.toFixed(1)} t/s) — skip re-bench`);
-            ctxResults.push({ cand, avg: reused, gpu: true, reused: true });
-            return { ok: true, avg: reused, gpuOk: true };
+            const summary = summaryFromSingleRate(reused);
+            ctxResults.push({ cand, gpu: true, reused: true, ...summary });
+            return { ok: summary.ok, median: summary.median, gpuOk: true };
           }
         }
 
         const gpuOk = await checkGPUFit(newName, { unified: isUnified, runner });
         if (!gpuOk) {
           console.log(`   ⚠️  num_ctx=${cand} not confirmed ${fitLabel}`);
-          ctxResults.push({ cand, avg: 0, gpu: false });
+          ctxResults.push({ cand, gpu: false, ...summarizeRates([]), failedRuns: repeatCount });
           return { ok: false, gpuMiss: true };
         }
-        const avg = await benchmarkModel(newName, repeatCount, `[ctx=${cand}] `, runner);
-        ctxResults.push({ cand, avg, gpu: true });
+        const summary = await benchmarkModel(newName, repeatCount, `[ctx=${cand}] `, runner);
+        ctxResults.push({ cand, gpu: true, ...summary });
         // ok only when benches produced a usable rate (GPU-fit alone is not enough to early-stop)
-        return { ok: avg > 0, avg, gpuOk: true };
+        return { ok: summary.ok, median: summary.median, gpuOk: true };
       }
 
       // 1) Test the user's chosen context first
@@ -2488,7 +2554,7 @@ async function main() {
             if (ctxGoal === 'max-context') {
               console.log('   Found a fitting size — skipping remaining smaller candidates (max-context).');
               for (const skip of plan.lowerDesc.filter((c) => c < cand)) {
-                ctxResults.push({ cand: skip, avg: 0, gpu: false });
+                ctxResults.push({ cand: skip, gpu: false, ...summarizeRates([]) });
               }
               break;
             }
@@ -2500,7 +2566,7 @@ async function main() {
         }
         // Current already failed GPU — larger sizes will not fit either
         for (const skip of plan.higherAsc) {
-          ctxResults.push({ cand: skip, avg: 0, gpu: false });
+          ctxResults.push({ cand: skip, gpu: false, ...summarizeRates([]) });
         }
       } else {
         // 2b) Current fits — probe upward until a true VRAM miss, then stop
@@ -2514,11 +2580,11 @@ async function main() {
           if (r.gpuMiss) {
             console.log('   Larger size failed GPU fit — skipping remaining bigger candidates.');
             for (const skip of plan.higherAsc.filter((c) => c > cand)) {
-              ctxResults.push({ cand: skip, avg: 0, gpu: false });
+              ctxResults.push({ cand: skip, gpu: false, ...summarizeRates([]) });
             }
             break;
           }
-          // gpuOk with avg 0: continue probing (timeout fluke should not kill the sweep)
+          // gpuOk with !ok rates: continue probing (timeout fluke should not kill the sweep)
         }
         // max-speed: also measure smaller sizes that should still fit (for TPS comparison)
         if (ctxGoal === 'max-speed' && plan.lowerDesc.length) {
@@ -2529,45 +2595,60 @@ async function main() {
         }
       }
 
-      const ctxValid = ctxResults.filter((r) => r.gpu && r.avg > 0);
-
       // Display by context size ascending
       const ctxDisplay = [...ctxResults].sort((a, b) => a.cand - b.cand);
-      const ctxValidSorted = [...ctxValid].sort((a, b) => b.avg - a.avg);
 
-      // Pick winner based on strategy
+      // Pick winner based on strategy (median + significance)
       let bestCtxEntry;
+      let ctxPickReason = '';
       if (ctxGoal === 'max-context') {
-        // Largest context that fits GPU (already sorted ascending, take last valid)
-        bestCtxEntry = ctxValid.length > 0 ? ctxValid.reduce((a, b) => (b.cand > a.cand ? b : a)) : null;
+        bestCtxEntry = pickMaxContext(ctxResults);
+        ctxPickReason = 'max-context';
       } else {
-        // Fastest TPS
-        bestCtxEntry = ctxValidSorted[0] || null;
+        const speedPick = pickSignificantWinner(baselineCtx, ctxResults, { preferSmallerOnTie: false });
+        bestCtxEntry = speedPick.entry?.ok
+          ? speedPick.entry
+          : ctxResults.filter((r) => r.gpu && r.ok).sort((a, b) => b.median - a.median)[0] || null;
+        if (speedPick.reason === 'no-significant') ctxPickReason = 'no-significant';
+        else if (speedPick.switched) ctxPickReason = 'significant';
       }
 
-      console.log('\n┌──────────────────────────────────────────────────────────────┐');
-      console.log('│    🐟 Phase 2: num_ctx Results (generation t/s)              │');
-      console.log('│    Strategy: ' + (ctxGoal === 'max-context' ? 'maximize context window' : 'maximize generation speed').padEnd(46) + ' │');
-      console.log('├──────────────┬────────────┬──────────┬───────────────────────┤');
-      console.log('│   num_ctx    │  avg TPS   │  GPU fit │                       │');
-      console.log('├──────────────┼────────────┼──────────┼───────────────────────┤');
-      for (let i = 0; i < ctxDisplay.length; i++) {
-        const r = ctxDisplay[i];
+      console.log('\n┌───────────────────────────────────────────────────────────────────────┐');
+      console.log('│    🐟 Phase 2: num_ctx Results (generation median t/s)               │');
+      console.log(
+        '│    Strategy: ' +
+          (ctxGoal === 'max-context' ? 'largest ctx not significantly slower' : 'max speed (significant win vs baseline)').padEnd(54) +
+          ' │',
+      );
+      console.log('├──────────────┬────────────┬──────────┬──────────┬────────────────────┤');
+      console.log('│   num_ctx    │  median    │  spread  │  GPU fit │                    │');
+      console.log('├──────────────┼────────────┼──────────┼──────────┼────────────────────┤');
+      for (const r of ctxDisplay) {
         const gpuStr = r.gpu ? '  100%  ' : '  ✗     ';
         let tag = '';
         if (bestCtxEntry && r.cand === bestCtxEntry.cand) tag = ' ◀ chosen';
         else if (r.cand === currentCtx) tag = ' (original)';
         else if (!r.gpu) tag = ' skipped';
-        console.log(`│  ${String(r.cand).padStart(10)} │ ${(r.avg > 0 ? r.avg.toFixed(1) : '—').padStart(10)} │ ${gpuStr} │ ${tag.padEnd(21)} │`);
+        else if (!r.ok) tag = ' failed';
+        console.log(
+          `│  ${String(r.cand).padStart(10)} │ ${(r.ok ? r.median.toFixed(1) : '—').padStart(10)} │ ${formatSpreadPct(r.spreadPct).padStart(8)} │ ${gpuStr} │ ${tag.padEnd(18)} │`,
+        );
       }
-      console.log('└──────────────┴────────────┴──────────┴───────────────────────┘');
+      console.log('└──────────────┴────────────┴──────────┴──────────┴────────────────────┘');
 
       if (bestCtxEntry) {
         bestCtx = bestCtxEntry.cand;
         if (ctxGoal === 'max-context') {
-          console.log(`\n   ✅ Largest ${fitLabel} context: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
+          console.log(
+            `\n   ✅ Largest ${fitLabel} context (not significantly slower than best): ${bestCtx} (${bestCtxEntry.median.toFixed(1)} t/s)`,
+          );
+        } else if (ctxPickReason === 'no-significant') {
+          const topChallenger = ctxResults
+            .filter((r) => r.gpu && r.ok && r.cand !== baselineCtx)
+            .sort((a, b) => b.median - a.median)[0];
+          console.log(`\n   ${formatNoSignificantMessage(baselineCtx, bestCtxEntry, topChallenger || null)}`);
         } else {
-          console.log(`\n   ✅ Fastest at ${fitLabel}: ${bestCtx} (${bestCtxEntry.avg.toFixed(1)} t/s)`);
+          console.log(`\n   ✅ Fastest significant win at ${fitLabel}: ${bestCtx} (${bestCtxEntry.median.toFixed(1)} t/s)`);
         }
       } else {
         const gpuOnly = [...ctxResults].filter((r) => r.gpu).sort((a, b) => b.cand - a.cand)[0];
