@@ -8,7 +8,7 @@ import {
   pickSignificantWinner,
   pickMaxContext,
   formatNoSignificantMessage,
-} from 'ollama-bench-stats';
+} from '../lib/bench-stats.js';
 
 describe('median / summarizeRates', () => {
   it('computes median for odd and even lengths', () => {

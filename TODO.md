@@ -11,11 +11,11 @@
 
 **[specs/strengthen-the-tuna.md](./specs/strengthen-the-tuna.md)** — single source of truth (merged reliability + framing specs).
 
-**Done (steps 1–9):** Credibility; remote/`/api/ps`; packaging `1.1.0`; framing; `--check`/`--json`/`--verify`; non-interactive create; embedding filter; Phase 1 opt-in `--tune-batch`; shared `packages/ollama-bench-stats`.
+**Done (steps 1–9):** Credibility; remote/`/api/ps`; packaging `1.1.0`; framing; `--check`/`--json`/`--verify`; non-interactive create; embedding filter; Phase 1 opt-in `--tune-batch`; bench helpers in `lib/bench-stats.js` (in-tree; no separate npm package).
 
-**Publish (maintainer):** (1) `packages/ollama-bench-stats` → `npm publish --access public`, (2) point Finetuna at the registry version, (3) `pnpm publish --access public` for `finetuna`. Agents do not publish.
+**Publish (maintainer):** from repo root, `pnpm publish --access public` (or `npm publish --access public`). Dry-run first with `--dry-run`. Agents do not publish.
 
-**Next:** Optional P3 mock-server cases; wire ollanet to `ollama-bench-stats` in that repo.
+**Next:** Optional P3 mock-server cases; keep ollanet bench semantics mirrored (extract a scoped shared package later only if needed).
 
 ## Lower priority / ideas
 

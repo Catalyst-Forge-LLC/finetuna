@@ -41,12 +41,11 @@
   ],
   "scripts": {
     "start": "node finetuna.js",
-    "test": "node --test test/*.test.mjs packages/ollama-bench-stats/index.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "prepublishOnly": "pnpm test"
   },
   "dependencies": {
     "ansi-colors": "^4.1.3",
-    "enquirer": "^2.3.6",
-    "ollama-bench-stats": "workspace:*"
+    "enquirer": "^2.3.6"
   }
 }

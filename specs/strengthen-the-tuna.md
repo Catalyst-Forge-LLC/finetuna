@@ -243,9 +243,9 @@ Highest-value cases (no GPU):
 
 Script: `"test": "node --test test/*.test.mjs"`. Extract pure helpers: `median`, `spreadPct`, `isSignificantWin`, `pickSignificantWinner`, `pickMaxContext`, `isLocalOllamaBase`, `gpuFitFromPsModel`, path helpers.
 
-### M5 · Shared `ollama-bench-stats` (cross-tool)
+### M5 · Shared bench-stats (cross-tool)
 
-After in-repo helpers + tests stabilize: publish tiny zero-dep ESM (`ollama-bench-stats` or `@catalyst-forge/ollama-bench-stats`); Finetuna + ollanet both depend on it so tuner and verifier cannot drift. Until then: identical semantics + mirrored tests + README “aligned with ollanet bench.”
+Keep helpers in-repo (`lib/bench-stats.js`). Align ollanet via identical semantics + mirrored tests + README “aligned with ollanet bench.” Extract a **scoped** package (e.g. `@catalyst-forge/ollama-bench-stats`) later only if sharing becomes painful — do not publish an unscoped generic name.
 
 ---
 
@@ -261,7 +261,7 @@ After in-repo helpers + tests stabilize: publish tiny zero-dep ESM (`ollama-benc
 | **6** | **P2 framing** | Tagline + README rewrite. |
 | **7** | **P2 features** | `--dry-run`, `--json`, then non-interactive / `--verify` / capabilities. |
 | **8** | **P1-3** | Measure Phase 1; keep or demote to `--tune-batch`. |
-| **9** | **M5** | Extract shared bench-stats; wire ollanet. |
+| **9** | **M5** | Stabilize in-repo bench-stats; mirror in ollanet (scoped extract later if needed). |
 
 Ship **1–2** before anything else. Rest lands incrementally.
 
@@ -292,7 +292,7 @@ Ship **1–2** before anything else. Rest lands incrementally.
 **D7.** Prefer `/api/ps` JSON for GPU-fit; CLI ps only as local degraded fallback.  
 **D8.** max-context: largest fitting ctx **not significantly slower** than best median.  
 **D9.** Default generation **`num_predict = 256`**; long prompt + fixed seed; non-`length` samples excluded from comparison.  
-**D10.** Extract shared bench-stats (M5) after in-repo helpers stabilize.  
+**D10.** Bench-stats stay in-tree for 1.1; optional scoped extract later (not unscoped npm).  
 **D11.** npm name **`finetuna`**; maintainer publishes (agents do not). Target version **1.1.0** for this release.  
 **D12.** Installed Modelfile = **cwd** (print absolute path); state/results/reports = `~/.finetuna/` / `FINETUNA_DIR` (Option A).  
 **D13.** Pitch = fit/keep, not weight fine-tuning and not “always faster.”
@@ -304,7 +304,7 @@ Ship **1–2** before anything else. Rest lands incrementally.
 | # | Question | Blocking? | Notes |
 | - | -------- | --------- | ----- |
 | 1 | After P1-3 measurement, keep Phase 1 default-on or `--tune-batch`? | **Resolved** | Default off; opt-in `--tune-batch` (batch wins rarely beat noise) |
-| 2 | Shared package name: `ollama-bench-stats` vs scoped `@catalyst-forge/…`? | **Resolved** | Unscoped `ollama-bench-stats` (npm name free) |
+| 2 | Shared package name: `ollama-bench-stats` vs scoped `@catalyst-forge/…`? | **Resolved** | No separate publish for 1.1; in-tree `lib/bench-stats.js`. If extracted later → scoped only. |
 | 3 | Soft unified-memory fit ratio exact value (0.5 vs keep processor hints)? | P1-2 | Match today’s Apple leniency |
 
 ---
@@ -317,7 +317,7 @@ Ship **1–2** before anything else. Rest lands incrementally.
 - `2026-08-10:` **Steps 3–4 landed:** P1-2 `/api/ps` fit; P1-1 remote host gating.
 - `2026-08-10:` **Step 5 landed:** P0-3 paths + `bin` / `1.1.0`.
 - `2026-08-10:` **Steps 6–7 landed:** P2 framing; `--check`/`--json`; `--verify`; non-interactive `--model/--name/--ctx/--batch/--gpu`; embedding-only filter via capabilities.
-- `2026-08-10:` **Steps 8–9 landed:** P1-3 Phase 1 opt-in `--tune-batch` + results `phase1` margins; M5 `packages/ollama-bench-stats` workspace package.
+- `2026-08-10:` **Steps 8–9 landed:** P1-3 Phase 1 opt-in `--tune-batch` + results `phase1` margins; M5 helpers remain in `lib/bench-stats.js` (no separate npm package).
 
 ---
 
@@ -333,8 +333,8 @@ Ship **1–2** before anything else. Rest lands incrementally.
 6. Non-interactive create (`--model --name --ctx …`, TTY prompts only when needed)  
 7. Embedding-only models filtered from picker (`lib/capabilities.js`)  
 8. Phase 1 (`num_batch`) opt-in via `--tune-batch`; default auto-tune = context fit-search; `phase1` margins in results  
-9. Shared `ollama-bench-stats` package (`packages/ollama-bench-stats`); Finetuna depends via workspace  
+9. Bench-stats in `lib/bench-stats.js` (ollanet-aligned semantics; no separate npm package)  
 
-**Still open (out of repo / polish):** Wire ollanet to the published package; optional P3 mock-server harness; maintainer npm publish (`ollama-bench-stats` then `finetuna`).  
+**Still open (out of repo / polish):** Mirror helpers in ollanet; optional P3 mock-server harness; maintainer `pnpm publish` for `finetuna` only.  
 
-**Verification:** `pnpm test` (49). Maintainer publishes.
+**Verification:** `pnpm test`. Maintainer publishes.

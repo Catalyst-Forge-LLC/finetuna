@@ -199,7 +199,7 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 - **Memory hints** are soft. GPU-fit via `/api/ps` is authoritative. Presets go through **128K**.
 - **Apple Silicon:** quit heavy apps if loads OOM; prefer Metal/MLX-ready models.
 - **Thinking models:** benches send `think: false`.
-- **Auto-tune** defaults to **context fit-search**. Phase 1 (`num_batch`) is opt-in via `--tune-batch`. Selection uses median + spread (shared `ollama-bench-stats` package, aligned with ollanet).
+- **Auto-tune** defaults to **context fit-search**. Phase 1 (`num_batch`) is opt-in via `--tune-batch`. Selection uses median + spread (`lib/bench-stats.js`, aligned with ollanet).
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` skips local GPU probes and trusts `/api/ps` on the server.
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 

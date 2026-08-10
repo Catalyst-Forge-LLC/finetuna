@@ -11,7 +11,7 @@ import {
   pickMaxContext,
   formatSpreadPct,
   formatNoSignificantMessage,
-} from 'ollama-bench-stats';
+} from './lib/bench-stats.js';
 import {
   isLocalOllamaBase,
   ollamaHostLabel,
