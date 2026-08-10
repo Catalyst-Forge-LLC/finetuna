@@ -1,25 +1,39 @@
 # Finetuna
 
-**Turn an Ollama model into a GPU-tuned, reusable variant** — with a Modelfile you can keep, a name you can remember, and optional auto-tune so context and batch fit *your* VRAM.
+**Fit more context on your GPU — and keep it.** VRAM-aware context tuner for Ollama.
+
+> **Not** weight fine-tuning (no LoRA/QLoRA/training). Finetuna tunes **runtime** settings — `num_ctx`, `num_batch`, `num_gpu` — and saves them as a reusable named model.
 
 ```bash
-pnpm start
-# → pick a model → create my-model-ctx32k → ollama run my-model-ctx32k
+finetuna --check              # will it fit? how much context can I get?
+finetuna                      # create a named variant you can keep
+finetuna --auto-tune          # optional: search batch/context with trustworthy stats
 ```
 
-## Why it exists
+## The problem you can't see
 
-Ollama’s defaults are safe but often leave performance (and context) on the table. Hand-editing Modelfiles and guessing `num_ctx` / `num_batch` is slow. Tools that only *benchmark* max context are useful — Finetuna goes one step further: it **creates the tuned model**, checks **GPU / Metal fit**, and can **auto-tune** until you have a stable recipe for apps and agents.
+If even a few layers spill to CPU, generation can slow down **5–10×**. Most people never check whether their model is fully resident — and Ollama's conservative defaults leave plenty of 24GB cards quietly running 4K context.
+
+Finetuna answers three questions:
+
+| Question | What you get |
+|----------|----------------|
+| *Will it fit?* | Verified via `/api/ps` (`size_vram` / `size`) — not a guess |
+| *How much context can I actually get?* | Largest window that stays on the GPU |
+| *Can I keep it?* | A named Modelfile variant any client can use forever |
+
+Honest **“no change needed”** is a feature. Auto-tune only switches settings when the win beats measured noise (median + spread, aligned with [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet) bench).
 
 | You want… | Finetuna |
 |-----------|----------|
 | A named model you can `ollama run` forever | Yes — writes Modelfile + `ollama create` |
-| Proof it stays on the GPU | Yes — `/api/ps` `size_vram`/`size` (Metal/unified soft rule on Apple Silicon) |
-| Best context *and* batch for speed | Optional auto-tune (pivot from your pick, not always 4K→up) |
+| Proof it stays on the GPU | Yes — `/api/ps` residency check |
+| Largest context that still fits | Yes — fit search (+ optional speed tune) |
+| Safe “look but don't touch” | `--check` / `--dry-run` (no create) |
 | OpenClaw / Hermes / Continue presets | `--openclaw` / `--hermes` / `--continue` |
-| Free memory for another app that needs the GPU | `--unload` / `--reload` |
+| Free memory for another GPU app | `--unload` / `--reload` |
 
-Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on the Ollama service). Finetuna is the **interactive Modelfile tuner**.
+Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on the Ollama service).
 
 ## Related: ollanet
 
@@ -27,22 +41,22 @@ Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on
 
 Typical loop:
 
-1. Here: `finetuna` (or `pnpm start` in a checkout) → create a tuned model (e.g. `gemma4-ctx32k`)
+1. Here: `finetuna` → create a tuned model (e.g. `gemma4-ctx32k`)
 2. Elsewhere: `ollanet scan` → `ollanet prompt this-host gemma4-ctx32k "…"`
 
 Same Ollama API — Finetuna shapes the models; ollanet finds and uses them over the network.
 
 ## What a run looks like
 
-1. Choose a source model and a new name (list grouped vs **free** memory when detectable; flags tight / too large / cloud)  
-2. Pick context / batch / GPU layers (presets through **128K**; sizes above a soft memory guide are labeled ambitious — not a hard limit)  
+1. Choose a source model and a new name (list grouped vs **free** memory when detectable)  
+2. Pick context / batch / GPU layers (presets through **128K**)  
 3. Finetuna writes **`Modelfile-finetuna`** and runs **`ollama create`**  
-4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false` for clean benches)  
-5. Optionally auto-tunes `num_batch` then `num_ctx` (probes via API options; one final create), with before/after rates  
+4. Measures baseline speed (`eval_rate` / `prompt_eval_rate`; thinking models use `think: false`)  
+5. Optionally auto-tunes `num_batch` then `num_ctx` (API options probe; one final create)  
 6. Suggests a self-documenting name like `gemma4-ctx32k-flash`  
 7. Saves state for `--reload` later  
 
-Goal: an **optimum that still fits in memory** — not “always shrink context.” If your size already fits, auto-tune probes *up*; if it doesn’t, it steps *down*.
+Goal: an **optimum that still fits in memory** — not “always shrink context,” not “always claim a speedup.”
 
 ### Apple Silicon (Mac)
 
@@ -53,18 +67,18 @@ On M-series Macs there is no separate VRAM — CPU and GPU share **unified memor
 - Treats full `/api/ps` residency (`size_vram ≈ size`) as GPU-fit; Apple Silicon uses a softer unified-memory ratio
 - Skips CUDA flash-attention prompts (Ollama uses Metal; MLX preview on newer Ollama prefers ≥32GB)
 
-Use normal Ollama Metal/MLX models from the library — no special Finetuna flag required. Keep Ollama updated for the best Apple Silicon runners.
+Use normal Ollama Metal/MLX models from the library — no special Finetuna flag required.
 
 ## Prerequisites
 
 - Node.js **18+**
-- [pnpm](https://pnpm.io/installation)
 - [Ollama](https://ollama.com) installed and running, with at least one model pulled
-- Optional: memory hints via `nvidia-smi` (VRAM), Apple `sysctl`/`vm_stat` (unified memory), AMD `rocm-smi`, or Windows WMI
+- Optional: [pnpm](https://pnpm.io/installation) for checkout development
+- Optional: memory hints via `nvidia-smi`, Apple `sysctl`/`vm_stat`, AMD `rocm-smi`, or Windows WMI
 
 ## Install
 
-**Global (recommended once published):**
+**Global:**
 
 ```bash
 npm install -g finetuna
@@ -72,7 +86,7 @@ npm install -g finetuna
 finetuna --help
 ```
 
-From GitHub before/without npm publish:
+From GitHub:
 
 ```bash
 npm install -g github:Catalyst-Forge-LLC/finetuna
@@ -87,8 +101,6 @@ pnpm install
 pnpm start
 ```
 
-HTTPS: `https://github.com/Catalyst-Forge-LLC/finetuna.git`
-
 ### Where files go
 
 | Mode | Modelfile | State / results / benchmark |
@@ -96,25 +108,20 @@ HTTPS: `https://github.com/Catalyst-Forge-LLC/finetuna.git`
 | Checkout (`pnpm start`) | `./Modelfile-finetuna` | current directory |
 | Installed (`finetuna` on PATH) | `./Modelfile-finetuna` (cwd) | `~/.finetuna/` |
 
-Override the data directory with `FINETUNA_DIR`. `--reload` reads the state file from that data dir, so after a global install it works from any cwd.
+Override the data directory with `FINETUNA_DIR`. `--reload` reads state from that data dir, so after a global install it works from any cwd.
 
 ## Quick start
 
 ```bash
-finetuna
-# checkout: pnpm start   or   node finetuna.js
-```
-
-Then:
-
-```bash
-ollama run your-tuned-model-name
+finetuna --check              # report fit / context headroom (no create)
+finetuna --check --model llama3.2 --json
+finetuna                      # interactive create
+finetuna --auto-tune
 ```
 
 Common invocations:
 
 ```bash
-finetuna --auto-tune
 finetuna --hermes --auto-tune     # 64K + Hermes config snippet
 finetuna --continue --auto-tune   # 16K coding preset + Continue snippet
 finetuna --openclaw --auto-tune   # 64K OpenClaw + gemma4 template
@@ -129,24 +136,27 @@ finetuna --help
 
 | Flag | Purpose |
 |------|---------|
+| `--check` / `--dry-run` | Report memory, soft context guide, and model fit hints — **no** `ollama create` |
+| `--model <name>` | Focus `--check` (or scripting) on one model |
+| `--json` | Emit a machine-readable JSON report (stdout) |
 | `--auto-tune` | Run batch/context benchmarks without the confirm prompt |
 | `--skip-batch` / `--skip-ctx` | Skip Phase 1 or Phase 2 of auto-tune |
 | `--openclaw` | OpenClaw preset: 64K context, `num_keep 64`, Gemma4 template block |
 | `--openclaw-agent` | Same as `--openclaw` plus `temperature 0.1` / `top_k 20` |
 | `--no-openclaw` | Clear OpenClaw preset even if `FINETUNA_OPENCLAW` is set |
-| `--hermes` | Hermes Agent preset: 64K context, `num_keep`, agent sampling + `~/.hermes/config.yaml` snippet |
-| `--continue` | Continue.dev preset: 16K context default, coding temperature + Continue `config.yaml` snippet |
-| `--max-vram` | Target max **dedicated NVIDIA** VRAM: high `num_ctx` default + auto-tune max-context (ignores Intel iGPU shared RAM) |
+| `--hermes` | Hermes Agent preset: 64K context, `num_keep`, agent sampling + config snippet |
+| `--continue` | Continue.dev preset: 16K context default, coding temperature + config snippet |
+| `--max-vram` | Target max **dedicated NVIDIA** VRAM: high `num_ctx` default + auto-tune max-context |
 | `--flash-attn` / `--no-flash-attn` | Tag `-flash` naming + print `OLLAMA_FLASH_ATTENTION` setup tips |
 | `--benchmark-report` | Markdown table + `finetuna-benchmark.md` (data dir) |
 | `--unload` / `--panic` | Evict loaded models from VRAM (`keep_alive: 0`) |
-| `--reload` | Load the last Finetuna model from the state file (cwd or `~/.finetuna/`) |
-| `--verbose` | Extra API / `ollama` diagnostics |
+| `--reload` | Load the last Finetuna model from the state file |
+| `--verbose` | Extra API / diagnostics |
 | `--timeout` / `--gen-timeout` / `--bench-repeats` | Timing and repeat controls |
 
 Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes` | `--continue`.
 
-**Flash attention** is an Ollama *server* setting (`OLLAMA_FLASH_ATTENTION=1`), not a Modelfile parameter. Finetuna will not inject `flash_attn` (Ollama rejects it). Restart Ollama after changing the env var.
+**Flash attention** is an Ollama *server* setting (`OLLAMA_FLASH_ATTENTION=1`), not a Modelfile parameter.
 
 ## Outputs
 
@@ -155,7 +165,7 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 | `Modelfile-finetuna` | Every create / recreate | **always cwd** (absolute path printed) |
 | `finetuna-results.json` | After auto-tune | cwd (checkout) or `~/.finetuna/` (installed) |
 | `finetuna-benchmark.md` | With `--benchmark-report` | same data dir as results |
-| `.finetuna-state.json` | End of a normal run — used by `--reload` | same data dir (gitignored in checkout) |
+| `.finetuna-state.json` | End of a normal run — used by `--reload` | same data dir |
 
 ## Environment variables
 
@@ -174,28 +184,17 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 | `FINETUNA_MAX_VRAM` | `1` / `true` / `yes` → same as `--max-vram` | off |
 | `FINETUNA_FLASH_ATTN` | Flash naming/tips; unset = prompt on capable GPUs | auto |
 
-```bash
-export FINETUNA_GEN_TIMEOUT=120000
-export BENCH_REPEATS=5
-pnpm start
-```
-
-```powershell
-$env:FINETUNA_GEN_TIMEOUT = '120000'
-$env:BENCH_REPEATS = '5'
-pnpm start
-```
-
 ## Tips
 
-- **Client presets:** `--hermes` (64K agent + Hermes yaml), `--continue` (16K coding + Continue yaml), `--openclaw` (64K + gemma4 template). Last flag wins. Match client `contextLength` / `ollama_num_ctx` to the tuned `num_ctx`. Use `--unload` when switching apps that share the GPU.
-- **`--max-vram`:** uses free **dedicated NVIDIA** VRAM (not Iris Xe shared RAM). Starts the context picker high and auto-tunes for largest fitting `num_ctx`. Close Cursor/other GPU apps first so more dedicated memory is free.
-- **GPU-heavy apps:** browsers (Brave/Chrome), IDEs, and other compute apps can quietly park several GB of VRAM. Finetuna flags them by name in the `GPU processes` line and low-free warnings (e.g. `brave.exe (browser — can hold GBs)`) and, with `--max-vram`, nudges you to close the specific offenders. On Windows, per-process VRAM shows as N/A (WDDM), so use `nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader` to see exact amounts.
-- **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit via `/api/ps` is the real check. Presets go through **128K**.
-- **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
-- **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.
-- **Auto-tune** probes `num_batch` / `num_ctx` via `/api/generate` **options** (no recreate per candidate), then runs one final `ollama create` for the winner. Use a lower `BENCH_REPEATS` for an even quicker pass.
-- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` — Finetuna skips local `nvidia-smi` / process lists and trusts `/api/ps` on the server. Or discover/chat from another machine with [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet).
+- **`--check` first** on a shared or unfamiliar machine — zero side effects.
+- **Client presets:** `--hermes` / `--continue` / `--openclaw`. Match client `contextLength` / `ollama_num_ctx` to the tuned `num_ctx`.
+- **`--max-vram`:** uses free **dedicated NVIDIA** VRAM (not Iris Xe shared RAM). Close GPU-heavy apps first.
+- **GPU-heavy apps:** browsers/IDEs can park several GB of VRAM; Finetuna flags them by name when detectable.
+- **Memory hints** are soft. GPU-fit via `/api/ps` is authoritative. Presets go through **128K**.
+- **Apple Silicon:** quit heavy apps if loads OOM; prefer Metal/MLX-ready models.
+- **Thinking models:** benches send `think: false`.
+- **Auto-tune** uses median + spread (not mean-of-3 argmax). Differences inside the noise keep the incumbent.
+- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` skips local GPU probes and trusts `/api/ps` on the server.
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 
 ## License

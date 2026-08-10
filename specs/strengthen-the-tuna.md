@@ -315,22 +315,21 @@ Ship **1–2** before anything else. Rest lands incrementally.
 - `2026-08-10:` Merged framing + build order; **D12** Modelfile = Option A.
 - `2026-08-10:` **Steps 1–2 landed:** `lib/bench-stats.js`; median/spread selection; pinned gen benches; `pnpm test`.
 - `2026-08-10:` **Steps 3–4 landed:** P1-2 `/api/ps` fit; P1-1 remote host gating.
-- `2026-08-10:` **Step 5 landed:** P0-3 paths (`lib/paths.js`, D12 Option A), shebang + `bin`, `1.1.0` package tee-up, install docs. Maintainer can `pnpm publish`. Next: P2 framing / `--dry-run`.
+- `2026-08-10:` **Step 5 landed:** P0-3 paths + `bin` / `1.1.0`.
+- `2026-08-10:` **Steps 6–7 (partial) landed:** P2 framing (README + banner tagline); `--check`/`--dry-run`, `--model`, `--json`. Remaining P2: non-interactive create, `--verify`, capability filter.
 
 ---
 
 ## 10. Implementation summary
 
-**Implemented:** _(in progress — through P0-3)_
+**Implemented:** _(in progress — through P2 framing + --check/--json)_
 
-1. `lib/bench-stats.js` — median/spread/significance helpers  
-2. Auto-tune selection uses challenger rule + D8 max-context  
-3. Gen bench: long prompt, `num_predict` 256, seed 42, exclude non-`length`  
-4. `lib/ollama-host.js` — `isLocalOllamaBase`, `gpuFitFromPsModel`  
-5. `checkGPUFit` polls `/api/ps` (CLI text only as local degraded fallback)  
-6. Remote `OLLAMA_HOST` skips local GPU probes; unknown-memory context labels  
-7. `lib/paths.js` — installed → `~/.finetuna/`; Modelfile stays cwd; `FINETUNA_DIR`  
-8. `package.json` `bin` + shebang; version **1.1.0**; `prepublishOnly` runs tests  
-9. `test/*.test.mjs` — path/host/bench unit tests  
+1. Credibility helpers + pinned benches + selection tests  
+2. `/api/ps` fit + remote host gating  
+3. Installable CLI paths + `bin` @ **1.1.0**  
+4. Fit-first README/banner/tagline (GitHub description updated)  
+5. `--check` / `--dry-run`, `--model`, `--json`  
 
-**Verification:** `pnpm test`; `npm pack --dry-run` (no `specs/`). Maintainer publishes.
+**Still open in P2:** non-interactive create, `--verify`, capability filter.  
+
+**Verification:** `pnpm test` (31). Maintainer publishes.

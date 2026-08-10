@@ -103,6 +103,12 @@ function parseFlags() {
     benchmarkReport: false,
     unload: false,
     reload: false,
+    /** Report fit / context headroom without ollama create */
+    check: false,
+    /** Machine-readable JSON report on stdout */
+    json: false,
+    /** Optional model name for --check / scripting */
+    model: null,
     /** Push context toward filling free dedicated NVIDIA VRAM */
     maxVram: envFlagTruthy('FINETUNA_MAX_VRAM'),
   };
@@ -112,9 +118,15 @@ function parseFlags() {
     if (a === '--help' || a === '-h') {
       console.log(
         [
-          'Usage: node finetuna.js [options]',
+          'Usage: finetuna [options]',
+          '',
+          'Fit more context on your GPU — and keep it.',
+          'Not weight fine-tuning — tunes num_ctx / num_batch / num_gpu into a named model.',
           '',
           'Options:',
+          '  --check, --dry-run    Report memory + fit hints (no ollama create)',
+          '  --model <name>        Focus --check on one model',
+          '  --json                Emit machine-readable JSON report on stdout',
           '  --timeout <ms>        Prompt-eval / API timeout (default: 20000)',
           '  --gen-timeout <ms>    Generation benchmark timeout (default: 120000)',
           '  --bench-repeats <N>   Benchmark repeats per candidate (default: 3)',
@@ -130,7 +142,7 @@ function parseFlags() {
           '  --no-flash-attn       Do not treat flash attention as enabled for naming/docs',
           '  --benchmark-report    Print markdown benchmark table (+ finetuna-benchmark.md)',
           '  --unload, --panic     Evict all loaded models from VRAM (keep_alive: 0)',
-          '  --reload              Reload last model from .finetuna-state.json',
+          '  --reload              Reload last model from state file',
           '  --max-vram            Target max dedicated NVIDIA VRAM (high ctx default + max-context auto-tune)',
           '  --verbose             Print raw ollama list / /api/ps details',
           '',
@@ -244,6 +256,23 @@ function parseFlags() {
     }
     if (a === '--max-vram') {
       flags.maxVram = true;
+      continue;
+    }
+    if (a === '--check' || a === '--dry-run') {
+      flags.check = true;
+      continue;
+    }
+    if (a === '--json') {
+      flags.json = true;
+      continue;
+    }
+    if ((a === '--model' || a === '-m') && next) {
+      flags.model = next;
+      i++;
+      continue;
+    }
+    if (a.startsWith('--model=')) {
+      flags.model = a.slice('--model='.length) || null;
       continue;
     }
   }
@@ -1188,6 +1217,145 @@ function classifyModelFit(name, meta, vramGB, { freeGB = null, unified = false }
 
 const FIT_TIER_ORDER = { ok: 0, unknown: 1, tight: 2, wont_fit: 3, cloud: 4 };
 
+function emitJsonReport(report) {
+  console.log(JSON.stringify(report, null, 2));
+}
+
+async function listModelNamesForCheck() {
+  try {
+    const tags = await fetchOllamaTagsByName();
+    if (tags.size) return [...tags.keys()];
+  } catch {
+    /* fall through */
+  }
+  try {
+    const output = execSync('ollama list', { encoding: 'utf8' });
+    return output
+      .trim()
+      .split('\n')
+      .slice(1)
+      .map((l) => l.trim().split(/\s+/)[0])
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Side-effect-free fit / context report (--check / --dry-run). */
+async function buildCheckReport({ modelFilter = null } = {}) {
+  const remote = !OLLAMA_IS_LOCAL;
+  const gpu = remote ? null : detectGpuMemory();
+  const vramGB = gpu?.totalGB ?? null;
+  const freeGB = gpu?.freeGB ?? null;
+  const unified = Boolean(gpu?.unified);
+  const softMaxCtx =
+    remote || vramGB == null
+      ? null
+      : FLAGS.maxVram
+        ? maxCtxFromFreeDedicatedVram(freeGB ?? vramGB)
+        : maxSuggestedCtxFromVram(vramGB);
+  const typicalDefaultCtx = 8192;
+  const defaultLeavesContextOnTable = softMaxCtx != null ? softMaxCtx > typicalDefaultCtx : null;
+
+  let tagsByName = new Map();
+  try {
+    tagsByName = await fetchOllamaTagsByName();
+  } catch {
+    /* optional */
+  }
+  let names = tagsByName.size ? [...tagsByName.keys()] : await listModelNamesForCheck();
+  if (modelFilter) {
+    const bare = String(modelFilter).replace(/:latest$/, '');
+    names = names.filter((n) => n === modelFilter || n === `${bare}:latest` || n.replace(/:latest$/, '') === bare);
+    if (!names.length) names = [modelFilter];
+  }
+
+  const models = names.map((name) => {
+    const meta = tagsByName.get(name) || tagsByName.get(name.replace(/:latest$/, '')) || null;
+    const fit = classifyModelFit(name, meta, vramGB, { freeGB, unified });
+    return {
+      name,
+      tier: fit.tier,
+      hint: fit.hint,
+      sizeGB: fit.sizeGB,
+      paramsB: fit.paramsB,
+      vision: fit.vision,
+    };
+  });
+
+  return {
+    ok: true,
+    mode: 'check',
+    version: '1.1.0',
+    ollamaBase: OLLAMA_BASE,
+    local: OLLAMA_IS_LOCAL,
+    memory: remote
+      ? {
+          remote: true,
+          host: OLLAMA_HOST_LABEL,
+          note: 'Local GPU probes disabled; memory guidance comes from /api/ps after load.',
+        }
+      : {
+          remote: false,
+          totalGB: vramGB,
+          freeGB,
+          usedGB: gpu?.usedGB ?? null,
+          unified,
+          name: gpu?.name ?? null,
+          vendor: gpu?.vendor ?? null,
+        },
+    softMaxCtx,
+    typicalDefaultCtx,
+    defaultLeavesContextOnTable,
+    models,
+    focus: modelFilter && models.length ? models[0] : null,
+    paths: {
+      dataDir: PATHS.dataDir,
+      modelfilePath: PATHS.modelfilePath,
+      installed: PATHS.installed,
+    },
+  };
+}
+
+function printCheckReport(report) {
+  console.log('\n🐟 Finetuna check — no models will be created\n');
+  if (report.memory.remote) {
+    console.log(`⚠️  Remote Ollama (${report.memory.host}) — ${report.memory.note}`);
+  } else if (report.memory.totalGB != null) {
+    const pool = report.memory.unified ? 'unified memory' : 'VRAM';
+    const free = report.memory.freeGB != null ? ` · ~${report.memory.freeGB}GB available` : '';
+    const label = report.memory.name || 'GPU';
+    console.log(`🧠 ${label}: ${report.memory.totalGB}GB ${pool}${free}`);
+  } else {
+    console.log('🧠 Memory: not detected locally');
+  }
+  if (report.softMaxCtx != null) {
+    console.log(`📏 Soft context guide: ~${report.softMaxCtx} (not a hard limit — GPU-fit is truth)`);
+    if (report.defaultLeavesContextOnTable) {
+      console.log(`   Typical Ollama defaults (~${report.typicalDefaultCtx}) likely leave context on the table.`);
+    } else {
+      console.log(`   Soft guide is near typical defaults (~${report.typicalDefaultCtx}) — headroom may be limited.`);
+    }
+  } else {
+    console.log('📏 Soft context guide: unknown (remote or undetected memory) — trust GPU-fit after load.');
+  }
+  console.log('');
+  if (report.focus) {
+    const m = report.focus;
+    console.log(`Focus: ${m.name}`);
+    console.log(`   Fit hint: ${m.tier}${m.hint ? ` — ${m.hint}` : ''}`);
+  } else if (report.models.length) {
+    console.log(`Models (${report.models.length}):`);
+    for (const m of report.models.slice(0, 40)) {
+      console.log(`   ${String(m.tier).padEnd(10)} ${m.name}${m.hint ? `  (${m.hint})` : ''}`);
+    }
+    if (report.models.length > 40) console.log(`   … +${report.models.length - 40} more`);
+  } else {
+    console.log('No local models found (is Ollama running / OLLAMA_HOST correct?)');
+  }
+  console.log('\nNo ollama create was performed. Run `finetuna` without --check to build a named variant.\n');
+}
+
 function buildModelSelectChoices(modelNames, tagsByName, vramGB, { freeGB = null, unified = false } = {}) {
   const annotated = modelNames.map((name) => {
     const meta = tagsByName.get(name) || tagsByName.get(name.replace(/:latest$/, '')) || null;
@@ -1993,10 +2161,18 @@ async function main() {
     await reloadLastModel();
     return;
   }
+  if (FLAGS.check) {
+    const report = await buildCheckReport({ modelFilter: FLAGS.model });
+    if (FLAGS.json) emitJsonReport(report);
+    else printCheckReport(report);
+    return;
+  }
 
-  console.log('\n🐟 Finetuna — The Ollama Model Tuner');
-  console.log('=====================================\n');
-  console.log("You can tune a guitar... but you can't tunafish! Let's fine-tune some models! 🐟\n");
+  if (!FLAGS.json) {
+    console.log('\n🐟 Finetuna — Fit more context on your GPU, and keep it.');
+    console.log('====================================================\n');
+    console.log('Not weight fine-tuning — runtime num_ctx / num_batch / num_gpu → a named model you can keep.\n');
+  }
 
   const flashSupported = detectFlashAttnSupport();
   /** User/docs intent for -flash naming; flash itself is OLLAMA_FLASH_ATTENTION on the server. */
@@ -2960,6 +3136,46 @@ async function main() {
     ensureDataDir(PATHS);
     fs.writeFileSync(PATHS.resultsFile, JSON.stringify(pendingResultsLog, null, 2));
     console.log(`\n   💾 Results saved to ${PATHS.resultsFile}`);
+    if (FLAGS.json) {
+      emitJsonReport({
+        ok: true,
+        mode: 'tune',
+        version: '1.1.0',
+        ollamaBase: OLLAMA_BASE,
+        local: OLLAMA_IS_LOCAL,
+        paths: {
+          dataDir: PATHS.dataDir,
+          modelfilePath: PATHS.modelfilePath,
+          resultsFile: PATHS.resultsFile,
+          stateFile: PATHS.stateFile,
+          installed: PATHS.installed,
+        },
+        ...pendingResultsLog,
+      });
+    }
+  } else if (FLAGS.json) {
+    emitJsonReport({
+      ok: true,
+      mode: 'create',
+      version: '1.1.0',
+      ollamaBase: OLLAMA_BASE,
+      local: OLLAMA_IS_LOCAL,
+      model: finalName,
+      source: sourceModel,
+      settings: {
+        numCtx: currentCtx,
+        numBatch: bestBatch != null ? bestBatch : parseInt(numBatch, 10) || 512,
+        numGpu,
+        flashAttn: sessionFlashAttn,
+        clientPreset: FLAGS.clientPreset,
+      },
+      paths: {
+        dataDir: PATHS.dataDir,
+        modelfilePath: PATHS.modelfilePath,
+        stateFile: PATHS.stateFile,
+        installed: PATHS.installed,
+      },
+    });
   }
 
   writeFinetunaState({
@@ -2991,7 +3207,7 @@ async function main() {
 
   console.log(`\n🎉 Finetuna complete! Your model is perfectly seasoned and ready to swim. 🐟`);
   console.log(`   Run it anytime with: ollama run ${finalName}`);
-  console.log(`   Free VRAM quickly: node finetuna.js --unload`);
+  console.log(`   Free VRAM quickly: finetuna --unload`);
   printClientConfigSnippet(FLAGS.clientPreset, { modelName: finalName, numCtx: currentCtx });
   console.log(`\nYour Modelfile is saved at ${PATHS.modelfilePath} — tweak it anytime!`);
   if (PATHS.usingSeparateDataDir) {
