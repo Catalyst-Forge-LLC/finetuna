@@ -21,6 +21,17 @@ Ollama’s defaults are safe but often leave performance (and context) on the ta
 
 Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on the Ollama service). Finetuna is the **interactive Modelfile tuner**.
 
+## Related: ollanet
+
+**Finetuna** runs on the machine that hosts Ollama. To *discover and chat* with those models from another box on your LAN, Tailscale, or VPN, use **[ollanet](https://github.com/Catalyst-Forge-LLC/ollanet)**.
+
+Typical loop:
+
+1. Here: `pnpm start` / Finetuna → create a tuned model (e.g. `gemma4-ctx32k`)
+2. Elsewhere: `ollanet scan` → `ollanet prompt this-host gemma4-ctx32k "…"`
+
+Same Ollama API — Finetuna shapes the models; ollanet finds and uses them over the network.
+
 ## What a run looks like
 
 1. Choose a source model and a new name (list grouped vs **free** memory when detectable; flags tight / too large / cloud)  
@@ -155,7 +166,7 @@ pnpm start
 - **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.
 - **Auto-tune** probes `num_batch` / `num_ctx` via `/api/generate` **options** (no recreate per candidate), then runs one final `ollama create` for the winner. Use a lower `BENCH_REPEATS` for an even quicker pass.
-- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434`
+- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` — or discover/chat from another machine with [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet)
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 
 ## License
