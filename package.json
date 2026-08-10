@@ -9,6 +9,28 @@
   "license": "MIT",
   "main": "finetuna.js",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Catalyst-Forge-LLC/finetuna.git"
+  },
+  "homepage": "https://github.com/Catalyst-Forge-LLC/finetuna#readme",
+  "bugs": {
+    "url": "https://github.com/Catalyst-Forge-LLC/finetuna/issues"
+  },
+  "keywords": [
+    "ollama",
+    "modelfile",
+    "llm",
+    "gpu",
+    "vram",
+    "tuner",
+    "cli"
+  ],
+  "files": [
+    "finetuna.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node finetuna.js"
   },

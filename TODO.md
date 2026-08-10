@@ -9,7 +9,8 @@
 
 ## Active spec
 
-- **[Auto-tune reliability, remote host, packaging](./specs/auto-tune-reliability-remote-packaging.md)** — address review findings: median+spread winner selection (align with ollanet bench), pin speed samples (`seed` / long prompt / `done_reason`), skip local GPU probes for remote `OLLAMA_HOST`, GPU-fit via `/api/ps` JSON, installable `bin` + `~/.finetuna/` paths, and mock-server tests. **Start with M1 (selection).**
+- **[Auto-tune reliability, remote host, packaging](./specs/auto-tune-reliability-remote-packaging.md)** — M1 selection first (median+spread, **D8** max-context not-significantly-slower, **`num_predict: 256`**). Then M2 remote/`/api/ps`, M3 bin + `~/.finetuna/` + publish tee-up (**you** publish `finetuna` — name is free), M4 tests, M5 shared `ollama-bench-stats` with ollanet.
+- **Still decide before M3:** installed Modelfile path — cwd vs `~/.finetuna/` vs home+`--modelfile` (tradeoffs in spec §5.5).
 
 ## Lower priority / ideas
 
