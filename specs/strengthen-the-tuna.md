@@ -335,6 +335,8 @@ Ship **1–2** before anything else. Rest lands incrementally.
 8. Phase 1 (`num_batch`) opt-in via `--tune-batch`; default auto-tune = context fit-search; `phase1` margins in results  
 9. Bench-stats in `lib/bench-stats.js` (ollanet-aligned semantics; no separate npm package)  
 
-**Still open (out of repo / polish):** Mirror helpers in ollanet; optional P3 mock-server harness; maintainer `pnpm publish` for `finetuna` only.  
+**Still open (out of repo / polish):** Mirror helpers in ollanet; optional P3 mock-server harness.  
 
-**Verification:** `pnpm test`. Maintainer publishes.
+**Publish:** GitHub Actions `publish.yml` (OIDC trusted publisher + `--provenance`). Local `npm publish` for 1.1.0 had no attestations — next version must ship from CI.  
+
+**Verification:** `pnpm test`. After release: `npm view finetuna dist.attestations`.

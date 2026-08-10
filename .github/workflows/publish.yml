@@ -1,13 +1,20 @@
-# Trusted publishing (OIDC) → npm. No NPM_TOKEN required.
-# Configure on npmjs.com once the workflow file exists on the default branch:
-#   Package → Settings → Trusted Publisher → GitHub Actions
+# Trusted publishing (OIDC) → npm with provenance. No NPM_TOKEN.
+#
+# Configure once on npmjs.com (Package → Settings → Trusted Publisher):
 #   Org/user: Catalyst-Forge-LLC
 #   Repository: finetuna
 #   Workflow filename: publish.yml
-#   Environment: npm  (optional but recommended — matches `environment:` below)
+#   Environment: npm  (must match `environment:` below)
 #   Allowed actions: npm publish
 #
+# Release flow:
+#   1. Bump package.json version + commit/push to default branch
+#   2. Create a GitHub Release (tag vX.Y.Z) — or run this workflow_dispatch
+#   3. Confirm: npm view finetuna dist.attestations
+#   Do NOT `npm publish` / `pnpm publish` from a laptop — that skips OIDC + provenance.
+#
 # Docs: https://docs.npmjs.com/trusted-publishers/
+#       https://docs.npmjs.com/generating-provenance-statements/
 name: Publish
 
 on:
@@ -34,7 +41,6 @@ jobs:
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
-          cache: pnpm
 
       - name: Ensure npm CLI supports OIDC trusted publishing
         run: npm install -g npm@latest && npm --version
@@ -43,6 +49,7 @@ jobs:
 
       - run: pnpm test
 
-      # OIDC auth + provenance are automatic with trusted publishing (npm ≥ 11.5.1).
-      # Do not set NODE_AUTH_TOKEN here — a token makes npm skip OIDC.
-      - run: npm publish --access public
+      # OIDC auth requires no NODE_AUTH_TOKEN (a token makes npm skip OIDC).
+      # --provenance is explicit; trusted publishing also enables it by default on npm ≥ 11.5.1.
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public

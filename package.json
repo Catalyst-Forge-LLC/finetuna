@@ -39,6 +39,10 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "start": "node finetuna.js",
     "test": "node --test test/*.test.mjs",
