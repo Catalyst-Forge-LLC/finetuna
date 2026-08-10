@@ -27,7 +27,7 @@ Not a full Ollama *server* optimizer (flash attention, KV cache env vars live on
 
 Typical loop:
 
-1. Here: `pnpm start` / Finetuna → create a tuned model (e.g. `gemma4-ctx32k`)
+1. Here: `finetuna` (or `pnpm start` in a checkout) → create a tuned model (e.g. `gemma4-ctx32k`)
 2. Elsewhere: `ollanet scan` → `ollanet prompt this-host gemma4-ctx32k "…"`
 
 Same Ollama API — Finetuna shapes the models; ollanet finds and uses them over the network.
@@ -64,19 +64,45 @@ Use normal Ollama Metal/MLX models from the library — no special Finetuna flag
 
 ## Install
 
+**Global (recommended once published):**
+
+```bash
+npm install -g finetuna
+# or: pnpm add -g finetuna
+finetuna --help
+```
+
+From GitHub before/without npm publish:
+
+```bash
+npm install -g github:Catalyst-Forge-LLC/finetuna
+```
+
+**From a checkout (dev):**
+
 ```bash
 git clone git@github.com:Catalyst-Forge-LLC/finetuna.git
 cd finetuna
 pnpm install
+pnpm start
 ```
 
 HTTPS: `https://github.com/Catalyst-Forge-LLC/finetuna.git`
 
+### Where files go
+
+| Mode | Modelfile | State / results / benchmark |
+|------|-----------|-----------------------------|
+| Checkout (`pnpm start`) | `./Modelfile-finetuna` | current directory |
+| Installed (`finetuna` on PATH) | `./Modelfile-finetuna` (cwd) | `~/.finetuna/` |
+
+Override the data directory with `FINETUNA_DIR`. `--reload` reads the state file from that data dir, so after a global install it works from any cwd.
+
 ## Quick start
 
 ```bash
-pnpm start
-# or: node finetuna.js
+finetuna
+# checkout: pnpm start   or   node finetuna.js
 ```
 
 Then:
@@ -88,15 +114,15 @@ ollama run your-tuned-model-name
 Common invocations:
 
 ```bash
-node finetuna.js --auto-tune
-node finetuna.js --hermes --auto-tune     # 64K + Hermes config snippet
-node finetuna.js --continue --auto-tune   # 16K coding preset + Continue snippet
-node finetuna.js --openclaw --auto-tune   # 64K OpenClaw + gemma4 template
-node finetuna.js --max-vram --auto-tune   # fill dedicated NVIDIA VRAM (high ctx)
-node finetuna.js --benchmark-report
-node finetuna.js --unload                 # free VRAM (alias: --panic)
-node finetuna.js --reload                 # warm last model from .finetuna-state.json
-node finetuna.js --help
+finetuna --auto-tune
+finetuna --hermes --auto-tune     # 64K + Hermes config snippet
+finetuna --continue --auto-tune   # 16K coding preset + Continue snippet
+finetuna --openclaw --auto-tune   # 64K OpenClaw + gemma4 template
+finetuna --max-vram --auto-tune   # fill dedicated NVIDIA VRAM (high ctx)
+finetuna --benchmark-report
+finetuna --unload                 # free VRAM (alias: --panic)
+finetuna --reload                 # warm last model from state file
+finetuna --help
 ```
 
 ## Flags
@@ -112,9 +138,9 @@ node finetuna.js --help
 | `--continue` | Continue.dev preset: 16K context default, coding temperature + Continue `config.yaml` snippet |
 | `--max-vram` | Target max **dedicated NVIDIA** VRAM: high `num_ctx` default + auto-tune max-context (ignores Intel iGPU shared RAM) |
 | `--flash-attn` / `--no-flash-attn` | Tag `-flash` naming + print `OLLAMA_FLASH_ATTENTION` setup tips |
-| `--benchmark-report` | Markdown table + `finetuna-benchmark.md` |
+| `--benchmark-report` | Markdown table + `finetuna-benchmark.md` (data dir) |
 | `--unload` / `--panic` | Evict loaded models from VRAM (`keep_alive: 0`) |
-| `--reload` | Load the last Finetuna model from `.finetuna-state.json` |
+| `--reload` | Load the last Finetuna model from the state file (cwd or `~/.finetuna/`) |
 | `--verbose` | Extra API / `ollama` diagnostics |
 | `--timeout` / `--gen-timeout` / `--bench-repeats` | Timing and repeat controls |
 
@@ -124,20 +150,23 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 
 ## Outputs
 
-| File | When |
-|------|------|
-| `Modelfile-finetuna` | Every create / recreate (editable; overwritten on the next recreate) |
-| `finetuna-results.json` | After auto-tune (rates, before/after, settings) |
-| `finetuna-benchmark.md` | With `--benchmark-report` |
-| `.finetuna-state.json` | End of a normal run — used by `--reload` (gitignored) |
+| File | When | Location |
+|------|------|----------|
+| `Modelfile-finetuna` | Every create / recreate | **always cwd** (absolute path printed) |
+| `finetuna-results.json` | After auto-tune | cwd (checkout) or `~/.finetuna/` (installed) |
+| `finetuna-benchmark.md` | With `--benchmark-report` | same data dir as results |
+| `.finetuna-state.json` | End of a normal run — used by `--reload` | same data dir (gitignored in checkout) |
 
 ## Environment variables
 
 | Variable | Role | Default |
 |----------|------|---------|
 | `OLLAMA_HOST` | Ollama HTTP API base | `http://127.0.0.1:11434` |
+| `FINETUNA_DIR` | Override data dir for state/results/benchmark | cwd, or `~/.finetuna` when installed |
 | `FINETUNA_TIMEOUT` | Prompt-eval / short API timeout (ms) | `20000` |
-| `FINETUNA_GEN_TIMEOUT` | Generation benchmark timeout (ms). Cold loads may need `120000+` | `60000` |
+| `FINETUNA_GEN_TIMEOUT` | Generation benchmark timeout (ms) | `120000` |
+| `FINETUNA_NUM_PREDICT` | Generation bench token cap | `256` |
+| `FINETUNA_BENCH_SEED` | Fixed seed for comparable bench repeats | `42` |
 | `BENCH_REPEATS` | Auto-tune repeats per candidate | `3` |
 | `FINETUNA_OPENCLAW` | `1` / `true` / `yes` → same as `--openclaw` | off |
 | `FINETUNA_HERMES` | `1` / `true` / `yes` → same as `--hermes` | off |

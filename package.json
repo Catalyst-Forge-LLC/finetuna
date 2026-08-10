@@ -1,13 +1,16 @@
 {
   "name": "finetuna",
-  "version": "1.0.0",
-  "description": "Interactive Modelfile tuner for Ollama — create GPU-fit variants with optional auto-tune",
+  "version": "1.1.0",
+  "description": "Fit more context on your GPU — and keep it. VRAM-aware context tuner for Ollama.",
   "engines": {
     "node": ">=18"
   },
   "packageManager": "pnpm@10.30.1",
   "license": "MIT",
   "main": "finetuna.js",
+  "bin": {
+    "finetuna": "./finetuna.js"
+  },
   "type": "module",
   "repository": {
     "type": "git",
@@ -19,10 +22,14 @@
   },
   "keywords": [
     "ollama",
-    "modelfile",
-    "llm",
-    "gpu",
     "vram",
+    "gpu",
+    "num_ctx",
+    "context-length",
+    "modelfile",
+    "local-llm",
+    "quantization",
+    "llm-performance",
     "tuner",
     "cli"
   ],
@@ -34,7 +41,8 @@
   ],
   "scripts": {
     "start": "node finetuna.js",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "pnpm test"
   },
   "dependencies": {
     "ansi-colors": "^4.1.3",

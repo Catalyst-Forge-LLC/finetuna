@@ -11,11 +11,9 @@
 
 **[specs/strengthen-the-tuna.md](./specs/strengthen-the-tuna.md)** — single source of truth (merged reliability + framing specs).
 
-**Done (steps 1–4):** P0 measurement credibility + selection tests; P1-2 `/api/ps` fit; P1-1 remote probe skip (`lib/ollama-host.js`, `pnpm test` 22 cases).
+**Done (steps 1–5):** Measurement credibility; `/api/ps` fit; remote host skip; packaging paths + `bin` (`1.1.0` tee-up). **You publish:** `pnpm test && npm pack --dry-run && pnpm publish --access public`.
 
-**Next:** P0-3 paths/`bin`/publish tee-up → README framing → `--dry-run`/`--json` → Phase 1 earn-runtime → shared `ollama-bench-stats`.
-
-**Locked for packaging:** installed Modelfile stays in **cwd** (print absolute path); state/results under `~/.finetuna/` (`FINETUNA_DIR`). Maintainer publishes `finetuna@1.1.0` (name is free).
+**Next:** P2 framing (README tagline polish) → `--dry-run`/`--json` → Phase 1 earn-runtime → shared `ollama-bench-stats`.
 
 ## Lower priority / ideas
 

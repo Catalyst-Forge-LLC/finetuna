@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import Enquirer from 'enquirer';
 import { createRequire } from 'module';
 import { execSync, spawnSync } from 'child_process';
@@ -18,6 +19,7 @@ import {
   findPsModel,
   gpuFitFromPsModel,
 } from './lib/ollama-host.js';
+import { resolveFinetunaPaths, ensureDataDir } from './lib/paths.js';
 
 const require = createRequire(import.meta.url);
 const colors = require('ansi-colors');
@@ -146,6 +148,7 @@ function parseFlags() {
           '  BENCH_REPEATS         Same as --bench-repeats',
           '  FINETUNA_NUM_PREDICT  Generation bench token cap (default 256)',
           '  FINETUNA_BENCH_SEED   Fixed seed for comparable bench repeats (default 42)',
+          '  FINETUNA_DIR          Data dir for state/results (default: cwd, or ~/.finetuna when installed)',
         ].join('\n'),
       );
       process.exit(0);
@@ -300,7 +303,7 @@ function parseGenerateResponseBody(text) {
   }
 }
 
-const STATE_FILE = path.join(process.cwd(), '.finetuna-state.json');
+const PATHS = resolveFinetunaPaths();
 const OPENCLAW_CTX_TIERS = [65536, 49152, 32768, 24576, 16384, 8192, 4096];
 
 /** Extract eval_rate / prompt_eval_rate from Ollama generate JSON (with duration fallback). */
@@ -901,14 +904,15 @@ function refreshGpuMemory(prev) {
 
 function readFinetunaState() {
   try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    return JSON.parse(fs.readFileSync(PATHS.stateFile, 'utf8'));
   } catch {
     return null;
   }
 }
 
 function writeFinetunaState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2));
+  ensureDataDir(PATHS);
+  fs.writeFileSync(PATHS.stateFile, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2));
 }
 
 /** Full /api/ps model rows (name, size, size_vram). */
@@ -982,7 +986,10 @@ async function unloadLoadedModels() {
 async function reloadLastModel() {
   const state = readFinetunaState();
   if (!state?.model) {
-    console.error('No .finetuna-state.json found (or missing model). Run Finetuna on a model first.');
+    console.error(`No state file found at ${PATHS.stateFile} (or missing model). Run Finetuna on a model first.`);
+    if (!PATHS.usingSeparateDataDir) {
+      console.error('Tip: after global install, state lives in ~/.finetuna/ (or FINETUNA_DIR).');
+    }
     process.exit(1);
   }
   console.log(`\n🐟 Reloading ${state.model} into VRAM...\n`);
@@ -1047,9 +1054,9 @@ function renderBenchmarkMarkdown(rows, modelName) {
 function writeBenchmarkReportFile(rows, modelName) {
   const md = renderBenchmarkMarkdown(rows, modelName);
   console.log('\n' + md);
-  const outPath = path.join(process.cwd(), 'finetuna-benchmark.md');
-  fs.writeFileSync(outPath, md);
-  console.log(`\n💾 Benchmark report saved to ${outPath}`);
+  ensureDataDir(PATHS);
+  fs.writeFileSync(PATHS.benchmarkFile, md);
+  console.log(`\n💾 Benchmark report saved to ${PATHS.benchmarkFile}`);
 }
 
 // Validate model name to prevent command injection (ollama names: alphanumeric, dash, underscore, dot, colon)
@@ -2024,7 +2031,13 @@ async function main() {
   let isUnified = false;
   const remoteOllama = !OLLAMA_IS_LOCAL;
 
-  if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
+  if (FLAGS.verbose) {
+    console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
+    console.log(`📁 Data dir: ${PATHS.dataDir}${PATHS.installed ? ' (installed)' : ' (checkout)'}`);
+    console.log(`📄 Modelfile: ${PATHS.modelfilePath}`);
+  } else if (PATHS.usingSeparateDataDir) {
+    console.log(`📁 State/results → ${PATHS.dataDir} (Modelfile stays in cwd)\n`);
+  }
 
   if (remoteOllama) {
     console.log(`⚠️  Remote Ollama (${OLLAMA_HOST_LABEL}) — local GPU probes disabled.`);
@@ -2305,7 +2318,7 @@ async function main() {
     : 'Tuned for your GPU (memory not auto-detected)';
   const modelfileContent = buildModelfileContent({ sourceModel, vramComment, numCtx, numGpu, numBatch, flashAttn: sessionFlashAttn });
 
-  const modelfilePath = path.join(process.cwd(), 'Modelfile-finetuna');
+  const modelfilePath = PATHS.modelfilePath;
   fs.writeFileSync(modelfilePath, modelfileContent);
   console.log(`\n✅ Modelfile created at ${modelfilePath} — seasoned and ready!`);
 
@@ -2944,9 +2957,9 @@ async function main() {
   if (pendingResultsLog) {
     pendingResultsLog.model = finalName;
     pendingResultsLog.alsoAs = finalName !== newName ? newName : undefined;
-    const resultsPath = path.join(process.cwd(), 'finetuna-results.json');
-    fs.writeFileSync(resultsPath, JSON.stringify(pendingResultsLog, null, 2));
-    console.log(`\n   💾 Results saved to finetuna-results.json`);
+    ensureDataDir(PATHS);
+    fs.writeFileSync(PATHS.resultsFile, JSON.stringify(pendingResultsLog, null, 2));
+    console.log(`\n   💾 Results saved to ${PATHS.resultsFile}`);
   }
 
   writeFinetunaState({
@@ -2980,7 +2993,10 @@ async function main() {
   console.log(`   Run it anytime with: ollama run ${finalName}`);
   console.log(`   Free VRAM quickly: node finetuna.js --unload`);
   printClientConfigSnippet(FLAGS.clientPreset, { modelName: finalName, numCtx: currentCtx });
-  console.log(`\nYour Modelfile is saved as "Modelfile-finetuna" — tweak it anytime!`);
+  console.log(`\nYour Modelfile is saved at ${PATHS.modelfilePath} — tweak it anytime!`);
+  if (PATHS.usingSeparateDataDir) {
+    console.log(`   State/results: ${PATHS.dataDir}`);
+  }
 }
 
 main().catch((err) => {
