@@ -23,6 +23,7 @@ import { resolveFinetunaPaths, ensureDataDir } from './lib/paths.js';
 import { isEmbeddingOnly, filterGenerativeModels } from './lib/capabilities.js';
 
 const require = createRequire(import.meta.url);
+const { version: VERSION } = require('./package.json');
 const colors = require('ansi-colors');
 
 // High-contrast Enquirer palette for dark terminals.
@@ -1225,7 +1226,7 @@ async function runVerify(modelName) {
   const report = {
     ok,
     mode: 'verify',
-    version: '1.1.0',
+    version: VERSION,
     model: name,
     ollamaBase: OLLAMA_BASE,
     local: OLLAMA_IS_LOCAL,
@@ -1438,7 +1439,7 @@ async function buildCheckReport({ modelFilter = null } = {}) {
   return {
     ok: true,
     mode: 'check',
-    version: '1.1.0',
+    version: VERSION,
     ollamaBase: OLLAMA_BASE,
     local: OLLAMA_IS_LOCAL,
     memory: remote
@@ -3433,7 +3434,7 @@ async function main() {
       emitJsonReport({
         ok: true,
         mode: 'tune',
-        version: '1.1.0',
+        version: VERSION,
         ollamaBase: OLLAMA_BASE,
         local: OLLAMA_IS_LOCAL,
         paths: {
@@ -3450,7 +3451,7 @@ async function main() {
     emitJsonReport({
       ok: true,
       mode: 'create',
-      version: '1.1.0',
+      version: VERSION,
       ollamaBase: OLLAMA_BASE,
       local: OLLAMA_IS_LOCAL,
       model: finalName,
