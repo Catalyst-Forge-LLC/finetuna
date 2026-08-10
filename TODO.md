@@ -7,10 +7,12 @@
 - **No `curl` for API calls** — benchmarks and GPU-fit loading use `fetch` (Node 18+).
 - **VRAM** — AMD path via `rocm-smi --showmeminfo vram`; clearer message when detection fails.
 
+## Active spec
+
+- **[Auto-tune reliability, remote host, packaging](./specs/auto-tune-reliability-remote-packaging.md)** — address review findings: median+spread winner selection (align with ollanet bench), pin speed samples (`seed` / long prompt / `done_reason`), skip local GPU probes for remote `OLLAMA_HOST`, GPU-fit via `/api/ps` JSON, installable `bin` + `~/.finetuna/` paths, and mock-server tests. **Start with M1 (selection).**
+
 ## Lower priority / ideas
 
 - **OpenClaw mode** is hardcoded to `gemma4` renderer/parser; support other families or `ollama show --modelfile` merge when needed.
 
-- **Tests.** No automated tests; fragile areas include parsing `ollama list` / `ollama ps`, and JSON shape from `/api/generate`. Smoke tests with mocked `execSync` would help.
-
-- **Binary / `bin` entry.** Optional: add `"bin": { "finetuna": "finetuna.js" }` and a shebang for global `pnpm link` / `npm link` usage.
+- **Tests / bin / remote GPU** — superseded by the active spec above (M2–M4).
