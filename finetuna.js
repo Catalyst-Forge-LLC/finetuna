@@ -11,7 +11,7 @@ import {
   pickMaxContext,
   formatSpreadPct,
   formatNoSignificantMessage,
-} from './lib/bench-stats.js';
+} from 'ollama-bench-stats';
 import {
   isLocalOllamaBase,
   ollamaHostLabel,
@@ -89,6 +89,11 @@ function parseFlags() {
     })(),
     autoTune: false,
     verbose: false,
+    /**
+     * Phase 1 (num_batch) is opt-in (P1-3): batch wins are often inside noise and cost VRAM.
+     * Default auto-tune = context-fit only. --tune-batch enables Phase 1; --skip-batch is a no-op alias.
+     */
+    tuneBatch: envFlagTruthy('FINETUNA_TUNE_BATCH'),
     skipBatch: false,
     skipCtx: false,
     /** @type {null|'openclaw'|'hermes'|'continue'} */
@@ -147,8 +152,9 @@ function parseFlags() {
           '  --gen-timeout <ms>    Generation benchmark timeout (default: 120000)',
           '  --bench-repeats <N>   Benchmark repeats per candidate (default: 3)',
           '  --auto-tune           Skip auto-tune confirmation prompt',
-          '  --skip-batch          Skip Phase 1 (num_batch sweep)',
-          '  --skip-ctx            Skip Phase 2 (num_ctx sweep)',
+          '  --tune-batch          Opt-in Phase 1 (num_batch sweep; off by default)',
+          '  --skip-batch          No-op alias (Phase 1 is already off unless --tune-batch)',
+          '  --skip-ctx            Skip Phase 2 (num_ctx fit search)',
           '  --openclaw            OpenClaw preset (64K ctx, gemma4 template, num_keep 64)',
           '  --openclaw-agent      Same as --openclaw with temperature 0.1 / top_k 20',
           '  --no-openclaw         Clear OpenClaw preset even if FINETUNA_OPENCLAW is set',
@@ -217,8 +223,14 @@ function parseFlags() {
       flags.verbose = true;
       continue;
     }
+    if (a === '--tune-batch') {
+      flags.tuneBatch = true;
+      continue;
+    }
     if (a === '--skip-batch') {
+      // P1-3: Phase 1 is off by default; keep flag as documented no-op alias.
       flags.skipBatch = true;
+      flags.tuneBatch = false;
       continue;
     }
     if (a === '--skip-ctx') {
@@ -2924,11 +2936,14 @@ async function main() {
     const batchResults = [];
     const ctxResults = [];
 
-    // ── Phase 1: num_batch sweep (measures prompt-eval / TTFT) ──
-    if (!FLAGS.skipBatch) {
-      console.log('  Phase 1: num_batch sweep (prompt-eval speed / TTFT)');
+    let phase1Meta = { ran: false, switched: false, reason: 'skipped' };
+
+    // ── Phase 1: num_batch sweep (opt-in via --tune-batch) ──
+    if (FLAGS.tuneBatch) {
+      console.log('  Phase 1: num_batch sweep (opt-in — prompt-eval speed / TTFT)');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       console.log('  num_batch affects prompt ingestion, not token generation.');
+      console.log('  Larger batches cost VRAM — challenger must beat noise (median + spread).');
       console.log('  Testing 50%–200% of your chosen batch in ~25% steps.');
       console.log('  Fast path: probe via /api/generate options (no ollama create until the end).\n');
 
@@ -2974,6 +2989,23 @@ async function main() {
 
       const batchPick = pickSignificantWinner(currentBatch, batchResults, { preferSmallerOnTie: true });
       bestBatch = batchPick.winner;
+      const incRow = batchResults.find((r) => r.cand === currentBatch);
+      const winRow = batchResults.find((r) => r.cand === bestBatch);
+      const winMarginPct =
+        incRow?.ok && winRow?.ok && incRow.median > 0
+          ? (winRow.median - incRow.median) / incRow.median
+          : null;
+      phase1Meta = {
+        ran: true,
+        switched: batchPick.switched,
+        reason: batchPick.reason,
+        incumbent: currentBatch,
+        winner: bestBatch,
+        winMarginPct,
+        incumbentSpreadPct: incRow?.spreadPct ?? null,
+        winnerSpreadPct: winRow?.spreadPct ?? null,
+        minWinPct: MIN_WIN_PCT,
+      };
 
       console.log('\n┌────────────────────────────────────────────────────────────────────┐');
       console.log('│    🐟 Phase 1: num_batch Results (prompt eval median t/s)         │');
@@ -3008,15 +3040,17 @@ async function main() {
         }
       }
     } else {
-      console.log('  Skipping Phase 1 (--skip-batch).');
+      console.log('  Skipping Phase 1 (num_batch) — opt-in with --tune-batch.');
+      console.log('  Default auto-tune focuses on context fit; batch sweeps rarely beat noise.\n');
     }
 
     if (!FLAGS.skipCtx) {
-      // ── Phase 2: num_ctx sweep (measures generation TPS + GPU fit) ──
+      // ── Phase 2: num_ctx fit search (+ generation TPS) ──
       console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('  Phase 2: num_ctx sweep (fit search + generation TPS)');
+      console.log('  Phase 2: num_ctx fit search (primary) + generation TPS');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('  Primary: largest context that stays on the GPU; speed is secondary.');
+      console.log('  Primary goal: largest context that stays on the GPU.');
+      console.log('  Speed is secondary — reject only significantly slower large windows.');
       console.log(`  Testing context sizes — skipping any that won't fit ${fitLabel}.`);
       console.log(
         `  Gen bench: num_predict=${FLAGS.numPredict}, seed=${FLAGS.benchSeed} (only done_reason=length counts).`,
@@ -3315,7 +3349,9 @@ async function main() {
         openClaw: FLAGS.openClaw,
         openClawAgent: FLAGS.openClawAgent,
         flashAttn: sessionFlashAttn,
+        tuneBatch: FLAGS.tuneBatch,
       },
+      phase1: phase1Meta,
       before: beforeMetrics?.success
         ? { evalRate: beforeMetrics.evalRate, promptEvalRate: beforeMetrics.promptEvalRate, tpsEval: beforeMetrics.tpsEval }
         : null,

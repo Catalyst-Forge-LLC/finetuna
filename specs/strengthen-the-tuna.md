@@ -1,7 +1,7 @@
 # Spec: Finetuna 1.1 — credibility, packaging, and framing
 
 **Spec kind:** Delivery  
-**Status:** Partial  
+**Status:** Complete (pending maintainer npm publish)  
 **Target:** `1.1.0`  
 **Date:** 2026-08-10  
 **Surfaces:** `finetuna.js`, `package.json`, `README.md`, `TODO.md`, `lib/bench-stats.js` (or equivalent), `test/*`  
@@ -303,8 +303,8 @@ Ship **1–2** before anything else. Rest lands incrementally.
 
 | # | Question | Blocking? | Notes |
 | - | -------- | --------- | ----- |
-| 1 | After P1-3 measurement, keep Phase 1 default-on or `--tune-batch`? | Blocks default UX only | Data-driven post-P0 |
-| 2 | Shared package name: `ollama-bench-stats` vs scoped `@catalyst-forge/…`? | M5 only | Check npm at extract time |
+| 1 | After P1-3 measurement, keep Phase 1 default-on or `--tune-batch`? | **Resolved** | Default off; opt-in `--tune-batch` (batch wins rarely beat noise) |
+| 2 | Shared package name: `ollama-bench-stats` vs scoped `@catalyst-forge/…`? | **Resolved** | Unscoped `ollama-bench-stats` (npm name free) |
 | 3 | Soft unified-memory fit ratio exact value (0.5 vs keep processor hints)? | P1-2 | Match today’s Apple leniency |
 
 ---
@@ -317,12 +317,13 @@ Ship **1–2** before anything else. Rest lands incrementally.
 - `2026-08-10:` **Steps 3–4 landed:** P1-2 `/api/ps` fit; P1-1 remote host gating.
 - `2026-08-10:` **Step 5 landed:** P0-3 paths + `bin` / `1.1.0`.
 - `2026-08-10:` **Steps 6–7 landed:** P2 framing; `--check`/`--json`; `--verify`; non-interactive `--model/--name/--ctx/--batch/--gpu`; embedding-only filter via capabilities.
+- `2026-08-10:` **Steps 8–9 landed:** P1-3 Phase 1 opt-in `--tune-batch` + results `phase1` margins; M5 `packages/ollama-bench-stats` workspace package.
 
 ---
 
 ## 10. Implementation summary
 
-**Implemented:** _(in progress — P2 feature set complete; P1-3 + M5 remain)_
+**Implemented:** Steps **1–9** of the build order (Finetuna 1.1 delivery set).
 
 1. Credibility helpers + pinned benches + selection tests  
 2. `/api/ps` fit + remote host gating  
@@ -331,7 +332,9 @@ Ship **1–2** before anything else. Rest lands incrementally.
 5. `--check` / `--json` / `--verify`  
 6. Non-interactive create (`--model --name --ctx …`, TTY prompts only when needed)  
 7. Embedding-only models filtered from picker (`lib/capabilities.js`)  
+8. Phase 1 (`num_batch`) opt-in via `--tune-batch`; default auto-tune = context fit-search; `phase1` margins in results  
+9. Shared `ollama-bench-stats` package (`packages/ollama-bench-stats`); Finetuna depends via workspace  
 
-**Still open:** P1-3 Phase 1 earn-runtime; M5 shared bench-stats.  
+**Still open (out of repo / polish):** Wire ollanet to the published package; optional P3 mock-server harness; maintainer npm publish (`ollama-bench-stats` then `finetuna`).  
 
-**Verification:** `pnpm test` (36). Maintainer publishes.
+**Verification:** `pnpm test` (49). Maintainer publishes.

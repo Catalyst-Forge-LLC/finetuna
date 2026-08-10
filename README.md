@@ -143,8 +143,10 @@ finetuna --help
 | `--name <name>` | New model name (non-interactive create; requires `--model`) |
 | `--ctx` / `--batch` / `--gpu` | Non-interactive `num_ctx` / `num_batch` / `num_gpu` |
 | `--json` | Emit a machine-readable JSON report (stdout) |
-| `--auto-tune` | Run batch/context benchmarks without the confirm prompt |
-| `--skip-batch` / `--skip-ctx` | Skip Phase 1 or Phase 2 of auto-tune |
+| `--auto-tune` | Run context fit-search (and optional batch) without the confirm prompt |
+| `--tune-batch` | Opt-in Phase 1 `num_batch` sweep (off by default — rarely beats noise) |
+| `--skip-batch` | No-op alias (Phase 1 already off unless `--tune-batch`) |
+| `--skip-ctx` | Skip Phase 2 (`num_ctx` fit search) |
 | `--openclaw` | OpenClaw preset: 64K context, `num_keep 64`, Gemma4 template block |
 | `--openclaw-agent` | Same as `--openclaw` plus `temperature 0.1` / `top_k 20` |
 | `--no-openclaw` | Clear OpenClaw preset even if `FINETUNA_OPENCLAW` is set |
@@ -197,7 +199,7 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 - **Memory hints** are soft. GPU-fit via `/api/ps` is authoritative. Presets go through **128K**.
 - **Apple Silicon:** quit heavy apps if loads OOM; prefer Metal/MLX-ready models.
 - **Thinking models:** benches send `think: false`.
-- **Auto-tune** uses median + spread (not mean-of-3 argmax). Differences inside the noise keep the incumbent.
+- **Auto-tune** defaults to **context fit-search**. Phase 1 (`num_batch`) is opt-in via `--tune-batch`. Selection uses median + spread (shared `ollama-bench-stats` package, aligned with ollanet).
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` skips local GPU probes and trusts `/api/ps` on the server.
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 

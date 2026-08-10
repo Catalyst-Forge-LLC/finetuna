@@ -14,6 +14,11 @@ importers:
       enquirer:
         specifier: ^2.3.6
         version: 2.4.1
+      ollama-bench-stats:
+        specifier: workspace:*
+        version: link:packages/ollama-bench-stats
+
+  packages/ollama-bench-stats: {}
 
 packages:
 

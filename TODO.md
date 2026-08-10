@@ -11,9 +11,11 @@
 
 **[specs/strengthen-the-tuna.md](./specs/strengthen-the-tuna.md)** — single source of truth (merged reliability + framing specs).
 
-**Done (steps 1–7):** Credibility; remote/`/api/ps`; packaging `1.1.0`; framing; `--check`/`--json`/`--verify`; non-interactive create; embedding filter. **You publish** when ready: `pnpm publish --access public`.
+**Done (steps 1–9):** Credibility; remote/`/api/ps`; packaging `1.1.0`; framing; `--check`/`--json`/`--verify`; non-interactive create; embedding filter; Phase 1 opt-in `--tune-batch`; shared `packages/ollama-bench-stats`.
 
-**Next:** P1-3 Phase 1 earn-runtime (measure → keep or `--tune-batch`) → M5 shared `ollama-bench-stats`.
+**Publish (maintainer):** (1) `packages/ollama-bench-stats` → `npm publish --access public`, (2) point Finetuna at the registry version, (3) `pnpm publish --access public` for `finetuna`. Agents do not publish.
+
+**Next:** Optional P3 mock-server cases; wire ollanet to `ollama-bench-stats` in that repo.
 
 ## Lower priority / ideas
 
