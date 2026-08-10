@@ -313,17 +313,21 @@ Ship **1–2** before anything else. Rest lands incrementally.
 
 - `2026-08-10:` Reliability spec drafted from external review; D8–D11 locked.
 - `2026-08-10:` Merged framing + build order; **D12** Modelfile = Option A.
-- `2026-08-10:` **Steps 1–2 landed:** `lib/bench-stats.js` (median/spread/challenger/max-context); benchmarks return summaries with `samples[]`; gen bench uses `LONG_PROMPT` + `num_predict: 256` + seed; non-`length` samples excluded; Phase 1/2 tables show median+spread; `pnpm test` (13 cases). Next: P1-2 `/api/ps` fit.
+- `2026-08-10:` **Steps 1–2 landed:** `lib/bench-stats.js`; median/spread selection; pinned gen benches; `pnpm test`.
+- `2026-08-10:` **Steps 3–4 landed:** P1-2 `/api/ps` fit (`lib/ollama-host.js`, `gpuFitFromPsModel`); P1-1 remote host skips local GPU probes, unknown-memory context tiers, unload/evict warnings; 22 unit tests. Next: P0-3 packaging paths + `bin`.
 
 ---
 
 ## 10. Implementation summary
 
-**Implemented:** _(in progress — P0-1, P0-2, P3 partial)_
+**Implemented:** _(in progress — through P1-1 / P1-2)_
 
-1. `lib/bench-stats.js` — pure median/spread/significance helpers  
+1. `lib/bench-stats.js` — median/spread/significance helpers  
 2. Auto-tune selection uses challenger rule + D8 max-context  
 3. Gen bench: long prompt, `num_predict` 256, seed 42, exclude non-`length`  
-4. `test/bench-stats.test.mjs` — 13 unit tests  
+4. `lib/ollama-host.js` — `isLocalOllamaBase`, `gpuFitFromPsModel`  
+5. `checkGPUFit` polls `/api/ps` (CLI text only as local degraded fallback)  
+6. Remote `OLLAMA_HOST` skips local GPU probes; unknown-memory context labels  
+7. `test/*.test.mjs` — 22 unit tests  
 
-**Verification:** `pnpm test` (pass). Manual idle double `--auto-tune` still recommended.
+**Verification:** `pnpm test` (pass). Manual remote `OLLAMA_HOST` smoke recommended.

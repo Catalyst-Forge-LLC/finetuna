@@ -11,6 +11,13 @@ import {
   formatSpreadPct,
   formatNoSignificantMessage,
 } from './lib/bench-stats.js';
+import {
+  isLocalOllamaBase,
+  ollamaHostLabel,
+  parsePsModels,
+  findPsModel,
+  gpuFitFromPsModel,
+} from './lib/ollama-host.js';
 
 const require = createRequire(import.meta.url);
 const colors = require('ansi-colors');
@@ -123,7 +130,7 @@ function parseFlags() {
           '  --unload, --panic     Evict all loaded models from VRAM (keep_alive: 0)',
           '  --reload              Reload last model from .finetuna-state.json',
           '  --max-vram            Target max dedicated NVIDIA VRAM (high ctx default + max-context auto-tune)',
-          '  --verbose             Print raw ollama list / ollama ps output',
+          '  --verbose             Print raw ollama list / /api/ps details',
           '',
           'Client presets (last flag wins if more than one): --openclaw | --hermes | --continue',
           '',
@@ -260,6 +267,8 @@ function getOllamaBase() {
 }
 
 const OLLAMA_BASE = getOllamaBase();
+const OLLAMA_IS_LOCAL = isLocalOllamaBase(OLLAMA_BASE);
+const OLLAMA_HOST_LABEL = ollamaHostLabel(OLLAMA_BASE);
 
 function createTimeoutSignal(ms) {
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
@@ -425,6 +434,9 @@ function printOomGuidance({ sourceModel, vramGB, numCtx, errMsg, sameAllocAsBefo
 /** Evict loaded models so a recreate/load has a clean shot at VRAM. */
 async function freeGpuVram() {
   console.log('\n🧹 Freeing VRAM (evicting loaded models)…');
+  if (!OLLAMA_IS_LOCAL) {
+    console.log(`   ⚠️  Remote host (${OLLAMA_HOST_LABEL}) — this evicts models others may be using.`);
+  }
   try {
     const models = await listLoadedModelsHttp();
     if (models.length === 0) {
@@ -441,10 +453,12 @@ async function freeGpuVram() {
       }
     }
   } catch {
-    try {
-      spawnSync('ollama', ['stop'], { timeout: 5000 });
-    } catch {
-      /* ignore */
+    if (OLLAMA_IS_LOCAL) {
+      try {
+        spawnSync('ollama', ['stop'], { timeout: 5000 });
+      } catch {
+        /* ignore */
+      }
     }
   }
   await sleep(400);
@@ -897,11 +911,17 @@ function writeFinetunaState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2));
 }
 
-async function listLoadedModelsHttp() {
-  const res = await fetch(`${OLLAMA_BASE}/api/ps`);
+/** Full /api/ps model rows (name, size, size_vram). */
+async function fetchPsModelsHttp() {
+  const res = await fetch(`${OLLAMA_BASE}/api/ps`, { signal: createTimeoutSignal(15000) });
   if (!res.ok) throw new Error(`GET /api/ps failed: HTTP ${res.status}`);
   const data = await res.json();
-  return (data.models || []).map((m) => m.name || m.model).filter(Boolean);
+  return parsePsModels(data);
+}
+
+async function listLoadedModelsHttp() {
+  const models = await fetchPsModelsHttp();
+  return models.map((m) => m.name).filter(Boolean);
 }
 
 async function evictModelFromVram(modelName) {
@@ -915,10 +935,20 @@ async function evictModelFromVram(modelName) {
 
 async function unloadLoadedModels() {
   console.log('\n🐟 Finetuna VRAM panic — evicting loaded models...\n');
+  if (!OLLAMA_IS_LOCAL) {
+    console.log(
+      `⚠️  Remote Ollama (${OLLAMA_HOST_LABEL}) — unload will evict models on a shared host.`,
+    );
+    console.log('   Anyone using this server will lose their loaded models.\n');
+  }
   let models = [];
   try {
     models = await listLoadedModelsHttp();
   } catch (e) {
+    if (!OLLAMA_IS_LOCAL) {
+      console.error(`Could not list loaded models via /api/ps on remote host: ${e.message}`);
+      process.exit(1);
+    }
     try {
       const ps = execSync('ollama ps', { encoding: 'utf8' });
       models = ps
@@ -1268,8 +1298,15 @@ function buildCtxSweepPlan(currentCtx, { clientPreset = null } = {}) {
   return { current: currentCtx, lowerDesc, higherAsc };
 }
 
-function getContextOptions(vramGB, { clientPreset = null, freeGB = null, maxVram = false } = {}) {
-  const softMax = maxVram ? maxCtxFromFreeDedicatedVram(freeGB ?? vramGB) : maxSuggestedCtxFromVram(vramGB);
+function getContextOptions(
+  vramGB,
+  { clientPreset = null, freeGB = null, maxVram = false, unknownMemory = false } = {},
+) {
+  const softMax = unknownMemory
+    ? null
+    : maxVram
+      ? maxCtxFromFreeDedicatedVram(freeGB ?? vramGB)
+      : maxSuggestedCtxFromVram(vramGB);
   const opts = [];
   const agent64k = clientPreset === 'openclaw' || clientPreset === 'hermes';
 
@@ -1281,8 +1318,8 @@ function getContextOptions(vramGB, { clientPreset = null, freeGB = null, maxVram
             ? 'Hermes target (64K)'
             : 'OpenClaw target (64K)'
           : contextTierShortLabel(t);
-      if (maxVram && t === softMax) label += ' — max-vram target';
-      else if (t > softMax) label += ' — ambitious for this VRAM (often still OK)';
+      if (!unknownMemory && maxVram && t === softMax) label += ' — max-vram target';
+      else if (!unknownMemory && softMax != null && t > softMax) label += ' — ambitious for this VRAM (often still OK)';
       opts.push({ name: `${t}  – ${label}`, value: t });
     }
     opts.push({ name: 'custom', message: 'Custom (any number you want)' });
@@ -1293,8 +1330,8 @@ function getContextOptions(vramGB, { clientPreset = null, freeGB = null, maxVram
   for (const t of CONTEXT_TIERS) {
     let label = contextTierShortLabel(t);
     if (t === 16384 && clientPreset === 'continue' && !maxVram) label = 'Continue.dev default (16K)';
-    if (maxVram && t === softMax) label += ' — max-vram target (fill dedicated VRAM)';
-    else if (t > softMax) label += ' — ambitious for this VRAM (often still OK)';
+    if (!unknownMemory && maxVram && t === softMax) label += ' — max-vram target (fill dedicated VRAM)';
+    else if (!unknownMemory && softMax != null && t > softMax) label += ' — ambitious for this VRAM (often still OK)';
     opts.push({ name: `${t}  – ${label}`, value: t });
   }
   // Enquirer Select returns choice.name, not choice.value — use name: 'custom' so the follow-up prompt runs.
@@ -1451,15 +1488,17 @@ function processorFitOk(processorInfo, gpuPct, unified) {
 }
 
 /**
- * Confirm the model is loaded with acceptable GPU/Metal offload.
- * Pass runner options to probe num_ctx/num_batch without recreating the model.
+ * Confirm the model is loaded with acceptable GPU/Metal offload via /api/ps
+ * (size_vram / size). Pass runner options to probe without ollama create.
+ * Local CLI `ollama ps` text parse is a degraded fallback only.
  */
 async function checkGPUFit(newName, { unified = false, runner = {}, forceUnload = false } = {}) {
   console.log(`\n🔍 Testing ${unified ? 'Metal / GPU' : 'GPU'} fit... 🐟`);
 
   if (forceUnload) {
     try {
-      spawnSync('ollama', ['stop', newName], { timeout: 5000 });
+      if (OLLAMA_IS_LOCAL) spawnSync('ollama', ['stop', newName], { timeout: 5000 });
+      else await evictModelFromVram(newName);
     } catch {
       /* may not be running */
     }
@@ -1467,7 +1506,6 @@ async function checkGPUFit(newName, { unified = false, runner = {}, forceUnload 
   }
 
   const options = { num_predict: 1, ...runner };
-  let loadOom = false;
   let loadErr = null;
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/generate`, {
@@ -1485,8 +1523,7 @@ async function checkGPUFit(newName, { unified = false, runner = {}, forceUnload 
         : null;
     if (errMsg) {
       loadErr = errMsg;
-      loadOom = isOomError(errMsg);
-      if (loadOom) {
+      if (isOomError(errMsg)) {
         console.log(`⚠️  Load OOM while probing (${printOomBrief(errMsg)}).`);
         return false;
       }
@@ -1499,56 +1536,94 @@ async function checkGPUFit(newName, { unified = false, runner = {}, forceUnload 
     }
   }
 
-  let psOutput = '';
-  let found = false;
-  let matchedLine = '';
+  let matched = null;
+  let httpPsFailed = false;
   for (let attempt = 0; attempt < 30; attempt++) {
     try {
-      psOutput = execSync('ollama ps', { encoding: 'utf8' });
-      const psLines = psOutput.trim().split('\n');
-      matchedLine =
-        psLines.slice(1).find((l) => {
-          const rowName = l.trim().split(/\s+/)[0];
-          return rowName === newName || rowName === newName + ':latest';
-        }) || '';
-      if (matchedLine) {
-        found = true;
-        break;
+      const models = await fetchPsModelsHttp();
+      matched = findPsModel(models, newName);
+      if (matched) break;
+    } catch (e) {
+      httpPsFailed = true;
+      if (FLAGS.verbose && attempt === 0) {
+        console.log(`\n   [verbose] /api/ps failed: ${e.message}`);
       }
-    } catch {
-      /* retry */
     }
     if (attempt === 0 && loadErr) {
       process.stdout.write(`   Waiting for model (${loadErr})…\r`);
     } else {
-      process.stdout.write(`   Waiting for model to appear in ollama ps (${(attempt + 1) * 0.5}s)...\r`);
+      process.stdout.write(`   Waiting for model in /api/ps (${(attempt + 1) * 0.5}s)...\r`);
     }
     await sleep(500);
   }
 
-  if (!found) {
-    console.log('\nModel did not appear in ollama ps after ~15s (cold load can be slow — try a higher FINETUNA_GEN_TIMEOUT).');
+  // Degraded local-only fallback when HTTP /api/ps never worked.
+  if (!matched && httpPsFailed && OLLAMA_IS_LOCAL) {
+    try {
+      const psOutput = execSync('ollama ps', { encoding: 'utf8' });
+      if (FLAGS.verbose) {
+        console.log('\n📊 ollama ps fallback:');
+        console.log(psOutput);
+      }
+      const matchedLine =
+        psOutput
+          .trim()
+          .split('\n')
+          .slice(1)
+          .find((l) => {
+            const rowName = l.trim().split(/\s+/)[0];
+            return rowName === newName || rowName === newName + ':latest';
+          }) || '';
+      if (matchedLine) {
+        const { processorInfo, gpuPct } = parseProcessorFromPsLine(matchedLine);
+        const ok = processorFitOk(processorInfo, gpuPct, unified);
+        if (processorInfo === '100% GPU' || processorInfo === 'Metal') {
+          console.log(`✅ Perfect! Model is on ${processorInfo === 'Metal' ? 'Metal' : 'GPU'} — it's hooked! 🐟`);
+        } else if (ok && unified) {
+          console.log(`✅ Loaded on Apple Silicon (${processorInfo}) — treating as GPU-fit OK.`);
+        } else if (processorInfo === 'unknown') {
+          console.log('⚠️  Could not confirm GPU offload from ollama ps — not treating as a hard fail.');
+          return true;
+        } else {
+          console.log(`⚠️  Not fully on GPU → ${processorInfo}`);
+        }
+        return ok;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  if (!matched) {
+    console.log(
+      '\nModel did not appear in /api/ps after ~15s (cold load can be slow — try a higher FINETUNA_GEN_TIMEOUT).',
+    );
     return false;
   }
 
   if (FLAGS.verbose) {
-    console.log('\n📊 ollama ps output:');
-    console.log(psOutput);
+    console.log('\n📊 /api/ps model:');
+    console.log(
+      `   name=${matched.name} size=${matched.size} size_vram=${matched.sizeVram}`,
+    );
   }
 
-  const { processorInfo, gpuPct } = parseProcessorFromPsLine(matchedLine);
-  const ok = processorFitOk(processorInfo, gpuPct, unified);
-
-  if (processorInfo === '100% GPU' || processorInfo === 'Metal') {
-    console.log(`✅ Perfect! Model is on ${processorInfo === 'Metal' ? 'Metal' : 'GPU'} — it's hooked! 🐟`);
-  } else if (ok && unified) {
-    console.log(`✅ Loaded on Apple Silicon (${processorInfo}) — unified memory, treating as GPU-fit OK.`);
-  } else if (processorInfo === 'unknown') {
-    console.log('⚠️  Could not confirm GPU offload from ollama ps (processor column unknown) — not treating as a hard fail.');
+  const fit = gpuFitFromPsModel(matched, { unified });
+  if (fit.reason === 'full') {
+    console.log(`✅ Perfect! Model is fully on GPU (size_vram/size=${fit.ratio?.toFixed(3)}) — it's hooked! 🐟`);
+  } else if (fit.ok && fit.reason === 'unified-ok') {
+    console.log(
+      `✅ Loaded on Apple Silicon / unified (size_vram/size=${fit.ratio?.toFixed(3)}) — treating as GPU-fit OK.`,
+    );
+  } else if (fit.ok && fit.reason === 'unknown-size') {
+    console.log('⚠️  Model loaded but /api/ps sizes unavailable — not treating as a hard fail.');
+  } else if (fit.reason === 'cpu-only') {
+    console.log('⚠️  Not on GPU → size_vram=0 (CPU-only residency).');
   } else {
-    console.log(`⚠️  Not fully on GPU → ${processorInfo}`);
+    const pct = fit.ratio != null ? `${(fit.ratio * 100).toFixed(1)}%` : '?';
+    console.log(`⚠️  Not fully on GPU → size_vram/size=${pct}`);
   }
-  return ok;
+  return fit.ok;
 }
 
 async function runTestPromptWithSpeed(newName) {
@@ -1943,43 +2018,60 @@ async function main() {
     console.log('🍎 macOS: skipping CUDA flash-attn prompts — Ollama uses Metal (and MLX on supported setups).\n');
   }
 
-  let gpu = detectGpuMemory();
-  let vramGB = gpu?.totalGB ?? null;
-  let vramFreeGB = gpu?.freeGB ?? null;
-  let isUnified = Boolean(gpu?.unified);
-  printGpuMemoryReport(gpu);
-  if (FLAGS.maxVram) {
-    const target = maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB);
-    console.log(
-      `🎯 --max-vram: aim to fill dedicated NVIDIA VRAM (soft target num_ctx ≈ ${target}; auto-tune uses max-context).`,
-    );
-    const reclaim = reclaimableGpuApps(gpu?.processes);
-    if (reclaim.length) {
-      const names = reclaim.map((p) => p.name).join(', ');
-      console.log(
-        `   ~${gpu?.freeGB ?? vramFreeGB ?? '?'}GB free now — closing ${names} could add several GB of headroom.\n`,
-      );
-    } else {
-      console.log('   Close other GPU apps / Cursor heavy tabs first so more dedicated memory is free for the model.\n');
-    }
-  }
-  if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
-  console.log('');
+  let gpu = null;
+  let vramGB = null;
+  let vramFreeGB = null;
+  let isUnified = false;
+  const remoteOllama = !OLLAMA_IS_LOCAL;
 
-  if (!(await warnIfLowFreeVram(gpu))) {
-    console.log(
-      isUnified
-        ? 'Aborting — free unified memory first (quit heavy apps), then re-run.'
-        : 'Aborting — free VRAM first (close Hermes / other GPU apps), then re-run.',
-    );
-    process.exit(0);
+  if (FLAGS.verbose) console.log(`🔗 Ollama API base: ${OLLAMA_BASE}`);
+
+  if (remoteOllama) {
+    console.log(`⚠️  Remote Ollama (${OLLAMA_HOST_LABEL}) — local GPU probes disabled.`);
+    console.log('    Memory guidance comes from /api/ps on the remote host after load.\n');
+    if (FLAGS.maxVram) {
+      console.log(
+        '🎯 --max-vram on a remote host: will maximize context that still GPU-fits via /api/ps (no local free-VRAM math).\n',
+      );
+    }
+  } else {
+    gpu = detectGpuMemory();
+    vramGB = gpu?.totalGB ?? null;
+    vramFreeGB = gpu?.freeGB ?? null;
+    isUnified = Boolean(gpu?.unified);
+    printGpuMemoryReport(gpu);
+    if (FLAGS.maxVram) {
+      const target = maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB);
+      console.log(
+        `🎯 --max-vram: aim to fill dedicated NVIDIA VRAM (soft target num_ctx ≈ ${target}; auto-tune uses max-context).`,
+      );
+      const reclaim = reclaimableGpuApps(gpu?.processes);
+      if (reclaim.length) {
+        const names = reclaim.map((p) => p.name).join(', ');
+        console.log(
+          `   ~${gpu?.freeGB ?? vramFreeGB ?? '?'}GB free now — closing ${names} could add several GB of headroom.\n`,
+        );
+      } else {
+        console.log('   Close other GPU apps / Cursor heavy tabs first so more dedicated memory is free for the model.\n');
+      }
+    }
+    console.log('');
+
+    if (!(await warnIfLowFreeVram(gpu))) {
+      console.log(
+        isUnified
+          ? 'Aborting — free unified memory first (quit heavy apps), then re-run.'
+          : 'Aborting — free VRAM first (close Hermes / other GPU apps), then re-run.',
+      );
+      process.exit(0);
+    }
+    // Re-read after the confirm pause in case the user freed memory.
+    gpu = refreshGpuMemory(gpu);
+    vramGB = gpu?.totalGB ?? vramGB;
+    vramFreeGB = gpu?.freeGB ?? vramFreeGB;
+    isUnified = Boolean(gpu?.unified);
   }
-  // Re-read after the confirm pause in case the user freed memory.
-  gpu = refreshGpuMemory(gpu);
-  vramGB = gpu?.totalGB ?? vramGB;
-  vramFreeGB = gpu?.freeGB ?? vramFreeGB;
-  isUnified = Boolean(gpu?.unified);
-  const fitLabel = gpuFitLabel(gpu);
+  const fitLabel = remoteOllama ? '100% GPU' : gpuFitLabel(gpu);
 
   // Fetch models
   let models = [];
@@ -2080,30 +2172,38 @@ async function main() {
   const newName = sanitizeName(rawNewName.trim());
 
   if (wantsAgent64kCtx()) {
-    const maxCtx = maxSuggestedCtxFromVram(vramGB);
     const who = FLAGS.clientPreset === 'hermes' ? 'Hermes' : 'OpenClaw';
-    if (vramGB == null) {
+    if (remoteOllama || vramGB == null) {
       console.log(
-        `${who} targets 65536 context; VRAM could not be detected — start at 64K and trust GPU-fit / auto-tune.\n`,
+        `${who} targets 65536 context; ${remoteOllama ? 'remote host — ' : ''}memory unknown — start at 64K and trust GPU-fit / auto-tune.\n`,
       );
-    } else if (maxCtx < 65536) {
-      console.log(
-        `${who} targets 65536; soft guide for ~${vramGB}GB is ${maxCtx}. Smaller/quantized models often still fit — GPU-fit is authoritative.\n`,
-      );
+    } else {
+      const maxCtx = maxSuggestedCtxFromVram(vramGB);
+      if (maxCtx < 65536) {
+        console.log(
+          `${who} targets 65536; soft guide for ~${vramGB}GB is ${maxCtx}. Smaller/quantized models often still fit — GPU-fit is authoritative.\n`,
+        );
+      }
     }
   }
 
   const ctxOptions = getContextOptions(vramGB, {
     clientPreset: FLAGS.clientPreset,
     freeGB: vramFreeGB,
-    maxVram: FLAGS.maxVram,
+    maxVram: FLAGS.maxVram && !remoteOllama,
+    unknownMemory: remoteOllama || vramGB == null,
   });
   let ctxInitial = 0;
-  if (FLAGS.maxVram) {
+  if (FLAGS.maxVram && !remoteOllama) {
     const target = maxCtxFromFreeDedicatedVram(vramFreeGB ?? vramGB);
     const pick = largestCtxTierAtOrBelow(target);
     const idx = ctxOptions.findIndex((o) => o.value === pick);
     if (idx >= 0) ctxInitial = idx;
+  } else if (FLAGS.maxVram && remoteOllama) {
+    // Remote max-vram: start at the largest tier; fit search will step down.
+    const idx = ctxOptions.findIndex((o) => o.value === 131072);
+    if (idx >= 0) ctxInitial = idx;
+    else ctxInitial = Math.max(0, ctxOptions.length - 2);
   } else if (wantsAgent64kCtx()) {
     const idx64 = ctxOptions.findIndex((o) => o.value === 65536);
     if (idx64 >= 0) ctxInitial = idx64;
@@ -2111,8 +2211,12 @@ async function main() {
     const idx16 = ctxOptions.findIndex((o) => o.value === 16384);
     if (idx16 >= 0) ctxInitial = idx16;
   }
-  const ctxMessage = FLAGS.maxVram
-    ? 'Context (num_ctx) — max-vram: start high to fill dedicated NVIDIA memory:'
+  const ctxMessage = remoteOllama
+    ? FLAGS.maxVram
+      ? 'Context (num_ctx) — remote max-vram: start high; /api/ps fit is authoritative:'
+      : 'Context (num_ctx) — remote Ollama (unknown memory; GPU-fit is authoritative):'
+    : FLAGS.maxVram
+      ? 'Context (num_ctx) — max-vram: start high to fill dedicated NVIDIA memory:'
     : FLAGS.clientPreset === 'openclaw'
       ? 'OpenClaw context (num_ctx) — 64K target, step down if VRAM is tight:'
       : FLAGS.clientPreset === 'hermes'
@@ -2216,21 +2320,25 @@ async function main() {
   let beforeMetrics = null;
   let afterMetrics = null;
 
-  gpu = refreshGpuMemory(gpu);
-  vramGB = gpu?.totalGB ?? vramGB;
-  vramFreeGB = gpu?.freeGB ?? vramFreeGB;
-  if (gpu?.freeGB != null) {
-    const pool = memoryPoolLabel(gpu);
-    console.log(`\n🧠 Before load: ~${gpu.freeGB}GB available / ${gpu.totalGB}GB ${pool}`);
-    const procs = formatGpuProcessSummary(gpu.processes);
-    if (procs) console.log(`   GPU processes: ${procs}`);
-    if (gpu.usedGB != null && gpu.usedGB >= 1.5 && gpu.freeGB < (isUnified ? 6 : 4)) {
-      console.log(
-        isUnified
-          ? '   ⚠️  Available unified memory is low — quit heavy apps before load.'
-          : '   ⚠️  Free VRAM is low — Hermes or other apps may cause OOM on load.',
-      );
+  if (!remoteOllama) {
+    gpu = refreshGpuMemory(gpu);
+    vramGB = gpu?.totalGB ?? vramGB;
+    vramFreeGB = gpu?.freeGB ?? vramFreeGB;
+    if (gpu?.freeGB != null) {
+      const pool = memoryPoolLabel(gpu);
+      console.log(`\n🧠 Before load: ~${gpu.freeGB}GB available / ${gpu.totalGB}GB ${pool}`);
+      const procs = formatGpuProcessSummary(gpu.processes);
+      if (procs) console.log(`   GPU processes: ${procs}`);
+      if (gpu.usedGB != null && gpu.usedGB >= 1.5 && gpu.freeGB < (isUnified ? 6 : 4)) {
+        console.log(
+          isUnified
+            ? '   ⚠️  Available unified memory is low — quit heavy apps before load.'
+            : '   ⚠️  Free VRAM is low — Hermes or other apps may cause OOM on load.',
+        );
+      }
     }
+  } else {
+    console.log(`\n🧠 Remote host ${OLLAMA_HOST_LABEL} — skipping local free-VRAM snapshot before load.`);
   }
 
   console.log('\n📏 Baseline speed (before auto-tune)...');
@@ -2259,7 +2367,8 @@ async function main() {
         const lowerOptions = getContextOptions(vramGB, {
           clientPreset: FLAGS.clientPreset,
           freeGB: vramFreeGB,
-          maxVram: FLAGS.maxVram,
+          maxVram: FLAGS.maxVram && !remoteOllama,
+          unknownMemory: remoteOllama || vramGB == null,
         }).filter((o) => o.value != null && o.value !== 'custom' && o.value < currentCtx);
         if (lowerOptions.length === 0) {
           printOomGuidance({
@@ -2796,7 +2905,8 @@ async function main() {
       const lowerOptions = getContextOptions(vramGB, {
         clientPreset: FLAGS.clientPreset,
         freeGB: vramFreeGB,
-        maxVram: FLAGS.maxVram,
+        maxVram: FLAGS.maxVram && !remoteOllama,
+        unknownMemory: remoteOllama || vramGB == null,
       }).filter((o) => o.value != null && o.value !== 'custom' && o.value < currentCtx);
       lowerOptions.push({ name: 'custom', message: 'Custom (lower)' });
 

@@ -14,7 +14,7 @@ Ollama’s defaults are safe but often leave performance (and context) on the ta
 | You want… | Finetuna |
 |-----------|----------|
 | A named model you can `ollama run` forever | Yes — writes Modelfile + `ollama create` |
-| Proof it stays on the GPU | Yes — checks `ollama ps` (`100% GPU` or Metal on Apple Silicon) |
+| Proof it stays on the GPU | Yes — `/api/ps` `size_vram`/`size` (Metal/unified soft rule on Apple Silicon) |
 | Best context *and* batch for speed | Optional auto-tune (pivot from your pick, not always 4K→up) |
 | OpenClaw / Hermes / Continue presets | `--openclaw` / `--hermes` / `--continue` |
 | Free memory for another app that needs the GPU | `--unload` / `--reload` |
@@ -50,7 +50,7 @@ On M-series Macs there is no separate VRAM — CPU and GPU share **unified memor
 
 - Reports total / available unified memory (not `nvidia-smi`)
 - Groups models against **available** memory, leaving headroom for macOS
-- Treats **Metal** / mostly-GPU `ollama ps` rows as a successful fit (not only `100% GPU`)
+- Treats full `/api/ps` residency (`size_vram ≈ size`) as GPU-fit; Apple Silicon uses a softer unified-memory ratio
 - Skips CUDA flash-attention prompts (Ollama uses Metal; MLX preview on newer Ollama prefers ≥32GB)
 
 Use normal Ollama Metal/MLX models from the library — no special Finetuna flag required. Keep Ollama updated for the best Apple Silicon runners.
@@ -162,11 +162,11 @@ pnpm start
 - **Client presets:** `--hermes` (64K agent + Hermes yaml), `--continue` (16K coding + Continue yaml), `--openclaw` (64K + gemma4 template). Last flag wins. Match client `contextLength` / `ollama_num_ctx` to the tuned `num_ctx`. Use `--unload` when switching apps that share the GPU.
 - **`--max-vram`:** uses free **dedicated NVIDIA** VRAM (not Iris Xe shared RAM). Starts the context picker high and auto-tunes for largest fitting `num_ctx`. Close Cursor/other GPU apps first so more dedicated memory is free.
 - **GPU-heavy apps:** browsers (Brave/Chrome), IDEs, and other compute apps can quietly park several GB of VRAM. Finetuna flags them by name in the `GPU processes` line and low-free warnings (e.g. `brave.exe (browser — can hold GBs)`) and, with `--max-vram`, nudges you to close the specific offenders. On Windows, per-process VRAM shows as N/A (WDDM), so use `nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv,noheader` to see exact amounts.
-- **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit (`100% GPU` / Metal on Mac) is the real check. Presets go through **128K**.
+- **Memory hints** are a soft, model-agnostic guide (not a limit). GPU-fit via `/api/ps` is the real check. Presets go through **128K**.
 - **Apple Silicon:** unified memory is shared with macOS — quit heavy apps if loads OOM; prefer Metal/MLX-ready models from Ollama.
 - **Thinking models** (e.g. qwen3.5): benchmarks send `think: false` so rates aren’t eaten by chain-of-thought.
 - **Auto-tune** probes `num_batch` / `num_ctx` via `/api/generate` **options** (no recreate per candidate), then runs one final `ollama create` for the winner. Use a lower `BENCH_REPEATS` for an even quicker pass.
-- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` — or discover/chat from another machine with [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet)
+- **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` — Finetuna skips local `nvidia-smi` / process lists and trusts `/api/ps` on the server. Or discover/chat from another machine with [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet).
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 
 ## License
