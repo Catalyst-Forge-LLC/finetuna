@@ -1,0 +1,14 @@
+{
+	// Cloudflare Pages — static output only (no Worker script).
+	// Deploy:  pnpm deploy   (= build + wrangler pages deploy build --project-name=finetuna)
+	//
+	// Prefer one pipeline. Git-connected Pages can build this folder now that
+	// getfilepress is on npm (root directory `site`, output `build`).
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "finetuna",
+	"compatibility_date": "2026-08-13",
+	"pages_build_output_dir": "build",
+	"observability": {
+		"enabled": true
+	}
+}

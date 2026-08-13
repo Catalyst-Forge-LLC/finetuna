@@ -9,3 +9,8 @@ finetuna-benchmark.md
 .DS_Store
 npm-debug.log
 dist/
+site/build/
+site/node_modules/
+site/.filepress/
+site/.filepress-genie/
+site/.filepress-import/

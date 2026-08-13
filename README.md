@@ -203,6 +203,10 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 - **Remote Ollama:** `OLLAMA_HOST=http://192.168.1.10:11434` skips local GPU probes and trusts `/api/ps` on the server.
 - **`--verbose`** when HTTP calls fail or the host URL looks wrong.
 
+## Site
+
+Marketing site (FilePress): [`site/`](site/). `pnpm site:dev` / `pnpm site:build` / `pnpm site:deploy`. Live target: [finetuna.dev](https://finetuna.dev).
+
 ## License
 
 [MIT](LICENSE)

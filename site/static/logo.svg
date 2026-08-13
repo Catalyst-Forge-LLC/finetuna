@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Finetuna">
+	<title>Finetuna</title>
+	<rect width="64" height="64" rx="14" fill="#163a46"/>
+	<ellipse cx="32" cy="34" rx="22" ry="14" fill="#1a7a6e"/>
+	<path fill="#d06820" d="M10 34 L2 24 L6 34 L2 44 Z"/>
+	<path fill="#125e55" d="M28 20 L36 12 L40 22 Z"/>
+	<path fill="#125e55" d="M30 46 L38 56 L42 45 Z"/>
+	<ellipse cx="42" cy="31" rx="3" ry="3.4" fill="#fbfffe"/>
+	<circle cx="43" cy="31" r="1.4" fill="#101820"/>
+</svg>

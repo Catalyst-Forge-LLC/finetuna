@@ -46,7 +46,10 @@
   "scripts": {
     "start": "node finetuna.js",
     "test": "node --test test/*.test.mjs",
-    "prepublishOnly": "pnpm test"
+    "prepublishOnly": "pnpm test",
+    "site:dev": "pnpm --dir site dev",
+    "site:build": "pnpm --dir site run build",
+    "site:deploy": "pnpm --dir site run deploy"
   },
   "dependencies": {
     "ansi-colors": "^4.1.3",
