@@ -135,9 +135,11 @@ header.site-header .site-wordmark {
 }
 
 header.site-header .site-logo {
-	height: 5.5rem;
+	height: 5.75rem;
 	max-height: none;
+	max-width: 7.25rem;
 	width: auto;
+	object-fit: contain;
 	border-radius: 0;
 	box-shadow: none;
 }
