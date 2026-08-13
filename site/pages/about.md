@@ -1,5 +1,5 @@
 ---
-title: Fit more context on your GPU — and keep it.
+title: Fit more context on your GPU — and keep it.
 description: VRAM-aware context tuner for Ollama. Named models that stay on the GPU.
 order: 1
 ---
