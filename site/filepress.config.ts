@@ -9,7 +9,7 @@ export default defineFilepressConfig({
 		'Fit more context on your GPU — and keep it. VRAM-aware context tuner for Ollama.',
 	tagline: 'Fit more context on your GPU — and keep it.',
 	lede: 'CLI · num_ctx · named models',
-	url: 'https://finetuna.dev',
+	url: 'https://finetuna.net',
 	author: 'Catalyst Forge LLC',
 	logo: '/logo.svg',
 	ogImage: '/logo.svg',

@@ -1,4 +1,4 @@
-# Finetuna.dev
+# Finetuna.net
 
 Marketing + notes site for [Finetuna](https://github.com/Catalyst-Forge-LLC/finetuna), built with [FilePress](https://getfilepress.com) ([`getfilepress`](https://www.npmjs.com/package/getfilepress) on npm).
 
@@ -21,7 +21,7 @@ pnpm deploy
 # = pnpm build && wrangler pages deploy build --project-name=finetuna
 ```
 
-Then attach **finetuna.dev** in the Cloudflare dashboard.
+Then attach **finetuna.net** in the Cloudflare dashboard.
 
 ### Git-connected Pages
 
@@ -43,6 +43,6 @@ Dependency is the public npm package:
 
 ## Launch checklist
 
-- [ ] `pnpm deploy` (or git-connected Pages) and confirm `https://finetuna.dev`
+- [ ] `pnpm deploy` (or git-connected Pages) and confirm `https://finetuna.net`
 - [ ] Attach the custom domain in Cloudflare Pages
 - [ ] Confirm `og:image` / Twitter card in a debugger

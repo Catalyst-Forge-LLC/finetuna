@@ -1,11 +1,11 @@
 ---
-title: "Hello from finetuna.dev"
+title: "Hello from finetuna.net"
 date: 2026-08-13
 description: Product site for the VRAM-aware Ollama context tuner — fit more context, keep a named model.
 tags: [meta, releases]
 ---
 
-**finetuna.dev** is the public home for Finetuna: install notes, short posts, and a place that is *not* the GitHub README.
+**finetuna.net** is the public home for Finetuna: install notes, short posts, and a place that is *not* the GitHub README.
 
 What the CLI already does:
 
