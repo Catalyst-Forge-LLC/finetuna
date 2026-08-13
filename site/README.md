@@ -8,7 +8,7 @@ pnpm dev          # local preview
 pnpm build        # → build/
 ```
 
-From the package root: `pnpm site:dev`, `pnpm site:build`, `pnpm site:deploy`.
+From the package root: `pnpm site:dev`, `pnpm site:build`, `pnpm ship`.
 
 Optional: edit `theme.css` next to `filepress.config.ts`.
 
@@ -17,7 +17,7 @@ Optional: edit `theme.css` next to `filepress.config.ts`.
 **Use one pipeline only.** Dual deploys overwrite each other when asset hashes disagree.
 
 ```bash
-pnpm deploy
+pnpm ship
 # = pnpm build && wrangler pages deploy build --project-name=finetuna
 ```
 
@@ -43,6 +43,6 @@ Dependency is the public npm package:
 
 ## Launch checklist
 
-- [ ] `pnpm deploy` (or git-connected Pages) and confirm `https://finetuna.net`
+- [ ] `pnpm ship` (or git-connected Pages) and confirm `https://finetuna.net`
 - [ ] Attach the custom domain in Cloudflare Pages
 - [ ] Confirm `og:image` / Twitter card in a debugger

@@ -205,7 +205,7 @@ Client presets are mutually exclusive (last flag wins): `--openclaw` | `--hermes
 
 ## Site
 
-Marketing site (FilePress): [`site/`](site/). `pnpm site:dev` / `pnpm site:build` / `pnpm site:deploy`. Live target: [finetuna.net](https://finetuna.net).
+Marketing site (FilePress): [`site/`](site/). `pnpm site:dev` / `pnpm site:build` / `pnpm ship`. Live target: [finetuna.net](https://finetuna.net).
 
 ## License
 
