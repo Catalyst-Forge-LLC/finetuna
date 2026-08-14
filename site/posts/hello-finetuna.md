@@ -15,6 +15,6 @@ What the CLI already does:
 - **Auto-tune** that only switches when the win beats measured noise (median + spread)
 - Remote Ollama via `OLLAMA_HOST`; companion discovery/chat on the network is [ollanet](https://ollanet.dev)
 
-Install with `npm i -g finetuna`, or see [/install](/install). npm **1.1.1** ships with provenance from GitHub Actions.
+Install with `npm i -g finetuna`, or see [/install](/install). npm **1.1.2** ships with provenance from GitHub Actions.
 
 This site is built with [FilePress](https://getfilepress.com) — git-native Markdown, static HTML, Cloudflare Pages.

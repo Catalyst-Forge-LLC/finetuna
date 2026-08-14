@@ -13,7 +13,7 @@
 
 **Done (steps 1–9):** Credibility; remote/`/api/ps`; packaging `1.1.0`; framing; `--check`/`--json`/`--verify`; non-interactive create; embedding filter; Phase 1 opt-in `--tune-batch`; bench helpers in `lib/bench-stats.js` (in-tree; no separate npm package).
 
-**Publish (maintainer):** via GitHub Actions only (`.github/workflows/publish.yml`) so npm gets OIDC + provenance. Current bump: **1.1.1** → push → GitHub Release `v1.1.1` (or `workflow_dispatch`). Do **not** publish from a laptop — that yields signatures without attestations (`dist.attestations` empty; `_npmUser` = you). After CI: `npm view finetuna dist.attestations` should be set. Trusted Publisher on npm must match `publish.yml` + environment `npm`. Agents do not publish.
+**Publish (maintainer):** via GitHub Actions only (`.github/workflows/publish.yml`) so npm gets OIDC + provenance. Current bump: **1.1.2** → push → GitHub Release `v1.1.2` (or `workflow_dispatch`). Do **not** republish an existing version (1.1.1 is already on npm). After CI: `npm view finetuna dist.attestations` should be set. Trusted Publisher on npm must match `publish.yml` + environment `npm`. Agents do not publish.
 
 **Next:** Optional P3 mock-server cases; keep ollanet bench semantics mirrored (extract a scoped shared package later only if needed).
 
