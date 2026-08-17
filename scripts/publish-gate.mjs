@@ -101,7 +101,11 @@ async function bumpIfNeeded() {
 }
 
 export function isGitHubActions() {
-	return process.env.GITHUB_ACTIONS === "true";
+	return (
+		process.env.GITHUB_ACTIONS === "true" ||
+		process.env.CI === "true" ||
+		Boolean(process.env.GITHUB_WORKFLOW)
+	);
 }
 
 export function allowLaptopPublish() {
