@@ -38,4 +38,5 @@ test("applyVersion keeps package.json formatting", () => {
 test("prepublishOnly runs the login and bump gate", () => {
 	const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 	assert.match(pkg.scripts.prepublishOnly, /publish-gate/);
+	assert.equal(pkg.publishConfig?.provenance, undefined);
 });
