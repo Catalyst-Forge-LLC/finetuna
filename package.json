@@ -46,7 +46,7 @@
   "scripts": {
     "start": "node finetuna.js",
     "test": "node --test test/*.test.mjs",
-    "prepublishOnly": "pnpm test",
+    "prepublishOnly": "node scripts/publish-gate.mjs && pnpm test",
     "ship": "pnpm --dir site run ship",
     "site:dev": "pnpm --dir site dev",
     "site:build": "pnpm --dir site run build",
