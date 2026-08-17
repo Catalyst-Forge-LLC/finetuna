@@ -1,20 +1,18 @@
 ---
-title: "Hello from finetuna.net"
+title: "finetuna.net"
 date: 2026-08-13
-description: Product site for the VRAM-aware Ollama context tuner — fit more context, keep a named model.
+description: Install notes and posts for the Ollama context tuner. Named models that stay on the GPU.
 tags: [meta, releases]
 ---
 
-**finetuna.net** is the public home for Finetuna: install notes, short posts, and a place that is *not* the GitHub README.
+The CLI is on npm. This site is install notes and short posts, not a second copy of the GitHub README.
 
-What the CLI already does:
+Three things it does:
 
-- **GPU-fit** via `/api/ps` (`size_vram` / `size`) — not a VRAM guess
-- **Named models** you can `ollama run` forever (`Modelfile-finetuna` + `ollama create`)
-- **`--check` / `--verify`** with no create side effects
-- **Auto-tune** that only switches when the win beats measured noise (median + spread)
-- Remote Ollama via `OLLAMA_HOST`; companion discovery/chat on the network is [ollanet](https://ollanet.dev)
+- GPU-fit via `/api/ps` (`size_vram` / `size`)
+- A named model you can `ollama run` (`Modelfile-finetuna` + `ollama create`)
+- `--check` / `--verify` with no create
 
-Install with `npm i -g finetuna`, or see [/install](/install). npm **1.1.2** ships with provenance from GitHub Actions.
+`npm i -g finetuna`, or see [/install](/install). **1.1.2** was published from GitHub Actions with provenance.
 
-This site is built with [FilePress](https://getfilepress.com) — git-native Markdown, static HTML, Cloudflare Pages.
+Companion for other machines on the network: [ollanet](https://ollanet.dev). The site is [FilePress](https://getfilepress.com).

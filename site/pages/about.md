@@ -4,9 +4,9 @@ description: VRAM-aware context tuner for Ollama. Named models that stay on the 
 order: 1
 ---
 
-**Finetuna** is not weight fine-tuning. No LoRA, no training. It tunes **runtime** settings — `num_ctx`, `num_batch`, `num_gpu` — and saves them as a reusable named Ollama model.
+Not weight fine-tuning. No LoRA, no training. Finetuna sets `num_ctx`, `num_batch`, and `num_gpu`, then saves a named Ollama model you can `ollama run`.
 
-If even a few layers spill to CPU, generation can slow down **5–10×**. Most people never check whether their model is fully resident — and Ollama’s conservative defaults leave plenty of 24GB cards quietly running 4K context.
+If part of the model spills to CPU, generation can drop by 5–10×. Ollama's defaults are conservative. A 24GB card can sit at 4K context and never get checked.
 
 <div class="cta-row">
   <a class="cta cta-primary" href="/install">Install Finetuna →</a>
@@ -15,13 +15,11 @@ If even a few layers spill to CPU, generation can slow down **5–10×**. Most p
 
 <p class="kicker">npm · pnpm · Node 18+ · MIT</p>
 
-## Three questions
+## What it answers
 
-- **Will it fit?** Verified via `/api/ps` (`size_vram` / `size`) — not a guess
-- **How much context can I actually get?** Largest window that stays on the GPU
-- **Can I keep it?** A named Modelfile variant any client can `ollama run` forever
+Does it fit? `/api/ps` compares `size_vram` to `size`. How much context still fits? The largest window that stays on the GPU. Can you keep the settings? A named Modelfile variant.
 
-Honest **“no change needed”** is a feature. Auto-tune only switches settings when the win beats measured noise (median + spread).
+Leaving the incumbent is valid. Auto-tune only switches when the win beats measured noise (median + spread).
 
 ## Quick start
 
@@ -31,30 +29,23 @@ finetuna --check
 finetuna
 ```
 
-Look-but-don’t-touch: `--check` / `--dry-run`. Non-interactive: `--model` `--name` `--ctx`. Optional fit-search: `--auto-tune`.
+`--check` and `--dry-run` never run `ollama create`. Non-interactive create: `--model` `--name` `--ctx`. Context fit-search: `--auto-tune`.
 
-Full flags live on the [install](/install) page and the [GitHub README](https://github.com/Catalyst-Forge-LLC/finetuna#readme).
+Flags: [install](/install) and the [GitHub README](https://github.com/Catalyst-Forge-LLC/finetuna#readme).
 
-## The ollanet loop
+## With ollanet
 
 <div class="mesh-panel">
-  <p>Finetuna runs on the machine that <em>hosts</em> Ollama. To discover and chat with those models from another box on your LAN, Tailscale, or VPN, use <a href="https://ollanet.dev"><strong>ollanet</strong></a>.</p>
-  <p>Here: <code>finetuna</code> → a tuned named variant. Elsewhere: <code>ollanet scan</code> → <code>ollanet prompt</code>. Same API, closed loop.</p>
+  <p>Finetuna runs on the machine that hosts Ollama. To find and chat with those models from another box, use <a href="https://ollanet.dev"><strong>ollanet</strong></a>.</p>
+  <p>Here: <code>finetuna</code> writes a named variant. There: <code>ollanet scan</code> then <code>ollanet prompt</code>. Same API.</p>
 </div>
 
 ## What a run does
 
-1. Choose a source model and a new name
-2. Pick context / batch / GPU layers (presets through **128K**)
-3. Write **`Modelfile-finetuna`** and run **`ollama create`**
+1. Pick a source model and a new name
+2. Pick context / batch / GPU layers (presets through 128K)
+3. Write `Modelfile-finetuna` and run `ollama create`
 4. Measure baseline speed; optionally search context that still fits
-5. Suggest a self-documenting name like `gemma4-ctx32k-flash`
-
-Goal: an **optimum that still fits in memory** — not “always shrink context,” not “always claim a speedup.”
-
-<div class="cta-row">
-  <a class="cta cta-primary" href="/install">Get started →</a>
-  <a class="cta cta-secondary" href="/writing">Read the posts</a>
-</div>
+5. Suggest a name like `gemma4-ctx32k-flash`
 
 Built by [Catalyst Forge LLC](https://www.catalystforge.com).

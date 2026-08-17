@@ -1,0 +1,36 @@
+---
+description: Finetuna overlay for aiBreze. Pronouns, carve-outs, protected lines.
+alwaysApply: true
+---
+
+# Finetuna × aiBreze overlay
+
+Full rules: sibling `aibreze` package (`rules/core.md`). Pages:
+`rules/landing.md`. Ship posts: `rules/launch.md`. README marketing
+half: landing. Flag tables / env / outputs: core only.
+
+## Pronouns
+
+- Site and README: **you** (reader) + **Finetuna / it**. No corporate we.
+- Credit line: "Built by Catalyst Forge LLC" is fine.
+
+## Terms that pass here
+
+- GPU-fit, `/api/ps`, `size_vram`, `num_ctx`, `num_batch`, `num_gpu`
+- VRAM, unified memory, Modelfile, `ollama create`
+- auto-tune, incumbent, median, spread (bench selection)
+- flash attention as an Ollama *server* setting
+- ollanet (companion CLI)
+
+## Protected
+
+- Product line: "Fit more context on your GPU — and keep it."
+- Teaching contrast: not weight fine-tuning (training vs runtime).
+  That is the one antithesis. Do not add a second "not X, it's Y."
+
+## House extras
+
+- Do not put recovery flags, settle timers, or path trivia in the
+  home brochure. Those live under Install or the README tables.
+- "Honest no change needed" is a result, not an honest-framing opener.
+  Say the result: leaving the incumbent is valid.

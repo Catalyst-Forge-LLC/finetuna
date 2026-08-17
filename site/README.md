@@ -1,6 +1,6 @@
-# Finetuna.net
+# finetuna.net
 
-Marketing + notes site for [Finetuna](https://github.com/Catalyst-Forge-LLC/finetuna), built with [FilePress](https://getfilepress.com) ([`getfilepress`](https://www.npmjs.com/package/getfilepress) on npm).
+Product site for [Finetuna](https://github.com/Catalyst-Forge-LLC/finetuna). [FilePress](https://getfilepress.com) (`getfilepress` on npm).
 
 ```bash
 pnpm install
@@ -39,7 +39,7 @@ Dependency is the public npm package:
 
 ## Content sync
 
-**Site** = product narrative (home, Install, posts). **Root README** = CLI / flag / env reference. Same promise sentence and “not weight fine-tuning” disambiguation in both; when behavior changes, update README + `site/pages/*`.
+Site: home, Install, posts. Root README: flags, env, outputs. Same product line and “not weight fine-tuning” contrast in both. When behavior changes, update the README and `site/pages/*`.
 
 ## Launch checklist
 
