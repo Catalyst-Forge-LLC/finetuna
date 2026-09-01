@@ -1,6 +1,6 @@
 {
   "name": "finetuna",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Fit more context on your GPU — and keep it. VRAM-aware context tuner for Ollama.",
   "engines": {
     "node": ">=18"
