@@ -5,9 +5,9 @@ const npm = 'https://www.npmjs.com/package/finetuna';
 
 export default defineFilepressConfig({
 	title: 'Finetuna',
-	description: 'VRAM-aware context tuner for Ollama. Named models that stay on the GPU.',
-	tagline: 'Keep the context on the GPU.',
-	lede: 'CLI · num_ctx · named models',
+	description: 'Ollama runtime tuner. Check GPU residency and save a named variant.',
+	tagline: 'Ollama runtime tuner.',
+	lede: 'CLI · runtime settings · named models',
 	url: 'https://finetuna.net',
 	author: 'Catalyst Forge LLC',
 	logo: '/logo.png',

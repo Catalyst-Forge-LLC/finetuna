@@ -41,7 +41,7 @@ Dependency is the public npm package:
 
 ## Content sync
 
-Site: home, Install, posts. Root README: flags, env, outputs. Same product line and “not weight fine-tuning” contrast in both. When behavior changes, update the README and `site/pages/*`.
+Site: home, Install, posts. Root README: flags, env, outputs. Lead with Ollama runtime tuner. Weights are not trained. When behavior changes, update the README and `site/pages/*`.
 
 ## Launch checklist
 

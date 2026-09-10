@@ -34,5 +34,6 @@ describe('--check / --dry-run', () => {
     assert.match(run.stdout, /--check/);
     assert.match(run.stdout, /--json/);
     assert.match(run.stdout, /Fit more context/);
+    assert.match(run.stdout, /runtime tuner/);
   });
 });

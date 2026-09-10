@@ -29,7 +29,7 @@ finetuna
 finetuna --model llama3.2 --name llama3.2-ft --ctx 32768 --auto-tune
 ```
 
-`--check` and `--dry-run` never run `ollama create`.
+`--check` and `--dry-run` never run `ollama create`. `--verify <name>` loads that existing name and reads `/api/ps`. It does not create a new model. Re-run it after you change the model, context, concurrency, or host load. A pass is a snapshot of that loaded run, not a perpetual residency guarantee.
 
 ### From GitHub
 

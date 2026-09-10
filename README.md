@@ -1,10 +1,16 @@
 # Finetuna
 
-**Fit more context on your GPU — and keep it.**
+**Ollama runtime tuner.** Fit more context on your GPU, and keep it.
 
-VRAM-aware context tuner for Ollama. Not weight fine-tuning: no LoRA, no
-training. Finetuna sets `num_ctx`, `num_batch`, and `num_gpu`, then saves
-a named model you can `ollama run`.
+Tune runtime settings for your model and GPU, check whether the tested
+configuration stays on the GPU, and save a named variant. Finetuna keeps
+the current settings when a measured improvement is not convincing.
+Weights are not trained or altered.
+
+It sets `num_ctx`, `num_batch`, and `num_gpu`, then writes a Modelfile
+and runs `ollama create`. Those settings change how much context and how
+many layers the host tries to keep in VRAM. They do not make the model
+reason better by themselves.
 
 ```bash
 finetuna --check              # fit and context headroom; no create
@@ -14,18 +20,26 @@ finetuna --auto-tune          # context fit-search (median + spread)
 
 ## When layers leave the GPU
 
-If part of the model spills to CPU, generation can drop by 5–10×. Ollama's
-defaults are conservative. A 24GB card can sit at 4K context and never get
-checked.
+If part of the model spills to CPU, generation can drop by 5–10×. Ollama
+picks a default context from detected VRAM, version, and any override
+such as `OLLAMA_CONTEXT_LENGTH`. Check the CONTEXT column in `ollama ps`
+for a loaded model instead of assuming a size from a card’s GB label.
+
+Official [context-length](https://docs.ollama.com/context-length) docs
+inspected 2026-09-10 list VRAM-dependent defaults in GiB, including 4K
+below 24 GiB and 32K at 24–48 GiB. Advertised GB is not the same unit as
+measured GiB, and older builds or an explicit override can differ.
 
 Finetuna answers:
 
-- Does it fit? `/api/ps` compares `size_vram` to `size`.
-- How much context still fits? The largest window that stays on the GPU.
+- Does this loaded run look GPU-resident? `/api/ps` compares `size_vram`
+  to `size`.
+- How much context still fits? The largest window that stays on the GPU
+  in that search.
 - Can I keep the settings? A named Modelfile variant.
 
-Leaving the incumbent is valid. Auto-tune only switches when the win beats
-measured noise (median + spread, same rule as
+Leaving the incumbent is valid. Auto-tune only switches when the win
+beats measured noise (median + spread, same rule as
 [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet)).
 
 It writes a Modelfile and runs `ollama create`. It does not set Ollama
@@ -33,10 +47,32 @@ server env vars (flash attention, KV cache). Also: `--check` / `--dry-run`,
 `--verify`, client presets (`--openclaw`, `--hermes`, `--continue`),
 `--unload` / `--reload`.
 
+## What residency checks
+
+`/api/ps` reports `size` (loaded footprint) and `size_vram` (the part on
+the GPU). Finetuna treats a high `size_vram/size` ratio as GPU-resident
+for that loaded run. Discrete GPUs need nearly all of `size` in VRAM
+(0.99). Apple Silicon uses a softer unified-memory ratio (0.5). Missing
+sizes are not treated as a hard fail.
+
+That observation is for the model, context, and host load at check time.
+Another model, a larger `num_ctx`, a second concurrent load, or a busier
+GPU can change the split. A pass is not a perpetual residency guarantee.
+
+| Command | Creates a named model? | What it measures |
+| --- | --- | --- |
+| `--check` / `--dry-run` | No | Memory and soft fit hints. Does not prove a named variant is resident. |
+| `--verify <name>` | No | Loads that existing name and reads `/api/ps`. |
+| default / `--auto-tune` | Yes (`ollama create`) | Fit and optional speed search on the new name. |
+
+Re-run `--verify` after you change the model, context, concurrency, or
+host load.
+
 ## ollanet
 
-Finetuna runs on the machine that hosts Ollama. To find and chat with those
-models from another box, use [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet).
+Finetuna runs on the machine that hosts Ollama. Each tool works alone.
+To find and chat with those models from another box, you can use
+[ollanet](https://github.com/Catalyst-Forge-LLC/ollanet).
 
 1. Here: `finetuna` → `gemma4-ctx32k`
 2. There: `ollanet scan` → `ollanet prompt this-host gemma4-ctx32k "…"`
@@ -130,7 +166,7 @@ finetuna --help
 | Flag | Purpose |
 |------|---------|
 | `--check` / `--dry-run` | Memory, soft context guide, fit hints. No `ollama create`. |
-| `--verify <name>` | Re-check GPU-fit after driver / Ollama / app drift |
+| `--verify <name>` | Re-check GPU-fit after model, context, concurrency, or host-load changes |
 | `--model <name>` | Source model (`--check` focus, or non-interactive create) |
 | `--name <name>` | New model name (non-interactive create; requires `--model`) |
 | `--ctx` / `--batch` / `--gpu` | Non-interactive `num_ctx` / `num_batch` / `num_gpu` |
@@ -191,8 +227,8 @@ not a Modelfile parameter.
 - `--max-vram` uses free dedicated NVIDIA VRAM, not Iris Xe shared RAM.
   Close GPU-heavy apps first. Finetuna flags browsers and IDEs by name
   when it can see them.
-- Memory hints are soft. `/api/ps` is the fit check. Presets go through
-  128K.
+- Memory hints are soft. `/api/ps` is the fit check for a loaded run.
+  Presets go through 128K.
 - On Apple Silicon, quit heavy apps if loads OOM. Prefer Metal/MLX-ready
   models.
 - Thinking-model benches send `think: false`.

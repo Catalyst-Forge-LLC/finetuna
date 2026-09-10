@@ -137,12 +137,12 @@ function parseFlags() {
         [
           'Usage: finetuna [options]',
           '',
-          'Fit more context on your GPU — and keep it.',
-          'Not weight fine-tuning — tunes num_ctx / num_batch / num_gpu into a named model.',
+          'Ollama runtime tuner. Fit more context on your GPU, and keep it.',
+          'Weights are not trained. Saves num_ctx, num_batch, and num_gpu as a named model.',
           '',
           'Options:',
           '  --check, --dry-run    Report memory + fit hints (no ollama create)',
-          '  --verify <name>       Re-check GPU-fit for an existing model',
+          '  --verify <name>       Re-check GPU-fit for an existing model (no create)',
           '  --model <name>        Source model (--check focus, or non-interactive create)',
           '  --name <name>         New model name (non-interactive create)',
           '  --ctx <n>             num_ctx (non-interactive; skips context picker)',
@@ -2341,9 +2341,9 @@ async function main() {
   }
 
   if (!FLAGS.json) {
-    console.log('\n🐟 Finetuna — Fit more context on your GPU, and keep it.');
+    console.log('\n🐟 Finetuna, Ollama runtime tuner.');
     console.log('====================================================\n');
-    console.log('Not weight fine-tuning — runtime num_ctx / num_batch / num_gpu → a named model you can keep.\n');
+    console.log('Tune runtime settings, check GPU residency, and save a named variant. Weights are not trained.\n');
   }
 
   const flashSupported = detectFlashAttnSupport();
