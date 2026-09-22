@@ -3,9 +3,9 @@
 **Ollama runtime tuner.** Fit more context on your GPU, and keep it.
 
 Tune runtime settings for your model and GPU, check whether the tested
-configuration stays on the GPU, and save a named variant. Finetuna keeps
-the current settings when a measured improvement is not convincing.
-Weights are not trained or altered.
+configuration stays on the GPU, and save a named variant. The saved
+settings fit the model and GPU Finetuna tested, under the load at test
+time. Weights are not trained or altered.
 
 It sets `num_ctx`, `num_batch`, and `num_gpu`, then writes a Modelfile
 and runs `ollama create`. Those settings change how much context and how
@@ -20,7 +20,8 @@ finetuna --auto-tune          # context fit-search (median + spread)
 
 ## When layers leave the GPU
 
-If part of the model spills to CPU, generation can drop by 5–10×. Ollama
+If part of the model spills to CPU, generation can run several times
+slower. Ollama
 picks a default context from detected VRAM, version, and any override
 such as `OLLAMA_CONTEXT_LENGTH`. Check the CONTEXT column in `ollama ps`
 for a loaded model instead of assuming a size from a card’s GB label.
@@ -38,8 +39,10 @@ Finetuna answers:
   in that search.
 - Can I keep the settings? A named Modelfile variant.
 
-Leaving the incumbent is valid. Auto-tune only switches when the win
-beats measured noise (median + spread, same rule as
+Leaving the incumbent is valid. The default context search picks the
+largest window that stayed on the GPU and was not measurably slower than
+the fastest candidate. A speed or batch search switches only when the
+win beats measured noise (median + spread, same rule as
 [ollanet](https://github.com/Catalyst-Forge-LLC/ollanet)).
 
 It writes a Modelfile and runs `ollama create`. It does not set Ollama
