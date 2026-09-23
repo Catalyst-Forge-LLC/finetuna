@@ -255,3 +255,5 @@ not a Modelfile parameter.
 ## License
 
 [MIT](LICENSE)
+
+[See the rest of the Catalyst Forge shelf.](https://catalystforge.com/tools/)
