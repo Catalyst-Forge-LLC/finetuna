@@ -145,12 +145,13 @@ dir, so a global install works from any cwd.
 
 ## Quick start
 
+First inspect a model you already have. Create the named variant. Then verify that variant. `llama3.2` stands for a model already on the host. `llama3.2-ft` is the name created by `--name`.
+
 ```bash
 finetuna --check
 finetuna --check --model llama3.2 --json
-finetuna --verify my-model-ctx32k
 finetuna --model llama3.2 --name llama3.2-ft --ctx 32768 --auto-tune
-finetuna
+finetuna --verify llama3.2-ft
 ```
 
 ```bash

@@ -21,15 +21,16 @@ pnpm add -g finetuna
 
 ### Look first, then create
 
+First inspect a model you already have. Create the named variant with the shown settings. Then verify that variant.
+
 ```bash
 finetuna --check
 finetuna --check --model llama3.2 --json
-finetuna --verify my-model-ctx32k
-finetuna
 finetuna --model llama3.2 --name llama3.2-ft --ctx 32768 --auto-tune
+finetuna --verify llama3.2-ft
 ```
 
-`--check` and `--dry-run` never run `ollama create`. `--verify <name>` loads that existing name and reads `/api/ps`. It does not create a new model. Re-run it after you change the model, context, concurrency, or host load. A pass is a snapshot of that loaded run, not a perpetual residency guarantee.
+`llama3.2` is an existing model you substitute. `llama3.2-ft` is the name from `--name` in the create step. `--check` and `--dry-run` never run `ollama create`. `--verify <name>` loads that existing name and reads `/api/ps`. It does not create a new model. Re-run it after you change the model, context, concurrency, or host load. A pass is a snapshot of that loaded run, not a perpetual residency guarantee.
 
 ### From GitHub
 
