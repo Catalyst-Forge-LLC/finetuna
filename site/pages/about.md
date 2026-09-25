@@ -6,7 +6,7 @@ order: 1
 
 Tune runtime settings for your model and GPU, check whether the tested configuration stays on the GPU, and save a named variant. The saved settings fit the model and GPU Finetuna tested, under the load at test time. Weights are not trained or altered.
 
-It sets `num_ctx`, `num_batch`, and `num_gpu`, then writes a Modelfile you can `ollama run`. Those settings change how much context and how many layers the host tries to keep in VRAM. They do not make the model reason better by themselves.
+It sets `num_ctx`, `num_batch`, and `num_gpu`, then writes a Modelfile. The Modelfile records the configuration. Create the named Ollama variant from it, then run that model by name. Those settings change how much context and how many layers the host tries to keep in VRAM. They do not make the model reason better by themselves.
 
 If part of the model spills to CPU, generation can run several times slower. Ollama picks a default context from detected VRAM, version, and any override. Check the CONTEXT column in `ollama ps` instead of assuming a 4K default from a 24 GB card label. Official docs use GiB bands, which are not the same as advertised GB.
 
