@@ -1,5 +1,5 @@
 ---
-title: Settings for this model on this GPU.
+title: Get more out of a local model on the GPU you already have.
 description: Tune runtime settings for your model and GPU, check residency, and save a named variant.
 order: 1
 ---
