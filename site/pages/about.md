@@ -1,5 +1,5 @@
 ---
-title: Ollama runtime tuner
+title: Settings for this model on this GPU.
 description: Tune runtime settings for your model and GPU, check residency, and save a named variant.
 order: 1
 ---
