@@ -1,4 +1,4 @@
-# Feature register: finetuna
+# Feature register: Finetuna
 
 Scan `scan-init`. Candidates are not confirmed capabilities.
 

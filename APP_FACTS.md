@@ -1,6 +1,6 @@
 ---
 app_facts_version: 0.1.0
-name: finetuna
+name: Finetuna
 type: CLI tool
 status: active
 license: MIT
@@ -27,7 +27,7 @@ generated:
   inputs_fingerprint: cfbeba074529b502
 ---
 
-# finetuna
+# Finetuna
 
 `CLI tool` · **active** · MIT
 
@@ -60,4 +60,4 @@ Curated stack label for this repository — aimed at an under-a-minute skim.
 ---
 *Generated with [AppFacts](https://appfacts.dev) · Scan `APP_FACTS.png` or open the [visual label][appfacts-label]*
 
-[appfacts-label]: https://appfacts.dev/v#af1.eNpNkcFuGzEMRH9lMWfZRq-6GiiQwu0luQVBwGiZNWuJUiTKxcLwvxfrbZ3cBGmGM3y64Az_zUEpMTzeRdm6EhxsLsvN_vAwWM4RDs3IeoMHBZMzwyFKYG2L7OfD06oIJ_gLIunUaVpeftCZHkOVYm54mguvZzjUria31F955O3vBodjbiY6Lbkx9_E9UmVcHUYuDf75AoUH60eXyhUOBR6ixnWtNIScEum4iaI8lJpTsYarW32kTTYhx1zbP2uzOYpOg3FNohSH3K10uzv-VNIp3pM-Ow0jl5jnxGo3OicxXF8c3rrEcQFQKJxo4tdEShNXeBQtacHKzeDRdZQWYm48wiEIPCaxY38blk2yLq1xzInLSvFoVprf7f5_0Fb5xpBLbmK5zl8066BtyGm3J6M4N9t8z3XizeGwv0_A9S-ziq47
+[appfacts-label]: https://appfacts.dev/v#af1.eNpNkcFqIzEQRH9lqLNss1ddDYEszl42txCWjqYz7lhqaaWWl8H435fxBCc3IVV1VT9dcIb_4aCUGB4PomxdCQ42l-Vmf3gcLOcIh2ZkvcGDgsmZ4RAlsLZF9vT4vCrCCf6CSDp1mpaXn3Sm36FKMTc8z4XXMxxqV5Nb6q888vajweGYm4lOS27MfXyPVBlXh5FLg3-5QOHB-rdL5QqHAg9R47pWGkJOiXTcRFEeSs2pWMPVrT7SJpuQY67t09psjqLTYFyTKMUhdyvd7o5_lXSK96SvTsPIJeY5sdqNzkkM11eHty5xXAAUCiea-E8ipYkrPIqWtGDlZvDoOkoLMTce4RAEHpPYsb8NyyZZl9Y45sRlpXg0K83vdu-fH7RVvjHkkptYrvM3zTpoG3La7ckozs02D7lOvDkc9vcJuP4HdequGw

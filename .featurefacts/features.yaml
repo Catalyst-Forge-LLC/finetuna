@@ -1,7 +1,7 @@
 schemaVersion: 0.2.0
 scan_id: scan-add
 product:
-  name: finetuna
+  name: Finetuna
   type: CLI tool
   status: unknown
   license: MIT

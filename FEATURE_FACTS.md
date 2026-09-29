@@ -2,7 +2,7 @@
 feature_facts_version: 0.2.0
 mode: map-backed
 audience: internal
-name: finetuna
+name: Finetuna
 type: unknown
 status: unknown
 selection_state: not-curated
@@ -16,7 +16,7 @@ generated:
   date: 2026-09-25
   generator: featurefacts
   generator_version: 0.2.0
-  projection_fingerprint: f1980695766a1654bc2345cf6974d607177a781bacda138259f61deefec6c23c
+  projection_fingerprint: ff434c8d763737b0f132a1ddf30cb71938f5e512070637fe468d139c7c4c7aea
 counts:
   scope: eligible-confirmed-active
   registered: 0
@@ -43,11 +43,11 @@ assessments:
     undisclosed: 0
 ---
 
-# Feature Facts: finetuna
+# Feature Facts: Finetuna
 
 What can this product do?
 
-Curation has not been approved. The scanner does not select rows.
+No confirmed non-retired capabilities are eligible for this publication target.
 
 Zero rows is a valid label. Candidates are not confirmed capabilities.
 Within the eligible confirmed scope: 0 registered, 0 selected, and 0 not selected.

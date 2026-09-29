@@ -28,6 +28,6 @@ export default defineFilepressConfig({
 		{ label: 'RSS', href: '/rss.xml' },
 		{ label: 'npm', href: npm },
 		{ label: 'GitHub', href: github, icon: 'github' },
-		{ label: 'AppFacts', href: 'https://appfacts.dev/v#af1.eNpFkUFrGzEQhf-KeGc5plddDYEEt5fmVkqZ7E7WE0sjVRq5LMb_PSgb3NugeY_vzdMVF4RvHkqJEfAmytaV4GFrGS-H45OznCM8mpH1hgCaTC4MjygTaxuy708vm2I6I1wRSZdOy9g804V-TlWKefeyFt5meNSuJp_UH3nmh_cGj1NuJroMbsx9fotUGTePmUtD-HWFIoD1b5fKFR4FAaLGdYvkppwS6byLouxKzalYw81vPtImuynHXNuXtdkaRRdnXJMoRZe7lW53x79KusQ76X8mN3OJeU2s9tnOWQy33x6vXeI8Cig0nWnhP4mUFq4IKFrSqJWbIeCdm7lcXZMkkQZgEgQsYqf-6sY1WUdyVC65ieW6IuBkVlrY7zfZw5TT_kBGcW22e8x14d3xeNjfP_H2AeS2o5g' }
+		{ label: 'AppFacts', href: 'https://appfacts.dev/v#af1.eNpNkcFqIzEQRH9lqLNss1ddDYEszl42txCWjqYz7lhqaaWWl8H435fxBCc3IVV1VT9dcIb_4aCUGB4PomxdCQ42l-Vmf3gcLOcIh2ZkvcGDgsmZ4RAlsLZF9vT4vCrCCf6CSDp1mpaXn3Sm36FKMTc8z4XXMxxqV5Nb6q888vajweGYm4lOS27MfXyPVBlXh5FLg3-5QOHB-rdL5QqHAg9R47pWGkJOiXTcRFEeSs2pWMPVrT7SJpuQY67t09psjqLTYFyTKMUhdyvd7o5_lXSK96SvTsPIJeY5sdqNzkkM11eHty5xXAAUCiea-E8ipYkrPIqWtGDlZvDoOkoLMTce4RAEHpPYsb8NyyZZl9Y45sRlpXg0K83vdu-fH7RVvjHkkptYrvM3zTpoG3La7ckozs02D7lOvDkc9vcJuP4HdequGw' }
 	]
 });
