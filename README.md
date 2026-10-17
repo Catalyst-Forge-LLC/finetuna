@@ -1,5 +1,7 @@
 # Finetuna
 
+<img src="https://finetuna.net/logo.png" width="440" alt="Finetuna: a chrome tuna with etched circuits and metallic pixels.">
+
 **Ollama runtime tuner.** Fit more context on your GPU, and keep it.
 
 Tune runtime settings for your model and GPU, check whether the tested
