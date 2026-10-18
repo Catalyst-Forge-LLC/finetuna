@@ -5,9 +5,9 @@ const npm = 'https://www.npmjs.com/package/finetuna';
 
 export default defineFilepressConfig({
 	title: 'Finetuna',
-	description: 'Ollama runtime tuner. Check GPU residency and save a named variant.',
+	description: "Finetuna tests runtime settings on your Ollama host, checks GPU residency, and saves a named configuration. Keep a useful setup for the hardware you have, instead of repeatedly guessing at flags.",
 	tagline: 'Ollama runtime tuner.',
-	lede: 'CLI · runtime settings · named models',
+	lede: "Command-line runtime tuner for Ollama",
 	url: 'https://finetuna.net',
 	author: 'Catalyst Forge LLC',
 	logo: '/logo.png',

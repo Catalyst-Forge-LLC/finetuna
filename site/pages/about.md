@@ -1,21 +1,12 @@
 ---
-title: Get more out of a local model on the GPU you already have.
-description: Tune runtime settings for your model and GPU, check residency, and save a named variant.
+title: "Find settings that fit your model and GPU."
+description: "Finetuna tests runtime settings on your Ollama host, checks GPU residency, and saves a named configuration. Keep a useful setup for the hardware you have, instead of repeatedly guessing at flags."
 order: 1
 ---
 
-Tune runtime settings for your model and GPU, check whether the tested configuration stays on the GPU, and save a named variant. The saved settings fit the model and GPU Finetuna tested, under the load at test time. Weights are not trained or altered.
+<section class="value-hero" aria-label="Finetuna overview"><div class="value-intro"><p class="value-kind">Command-line runtime tuner for Ollama</p><h1>Find settings that fit your model and GPU.</h1><p class="value-lede">Finetuna tests runtime settings on your Ollama host, checks GPU residency, and saves a named configuration. Keep a useful setup for the hardware you have, instead of repeatedly guessing at flags.</p><div class="cta-row"><a class="cta cta-primary" href="/install">Install Finetuna</a><a class="cta cta-secondary" href="#quick-start">See the tuning workflow</a></div><p class="value-limit">It changes runtime settings, not model weights. Results apply to the tested model, context, and host load.</p></div><figure class="value-proof"><figcaption>Illustrative example</figcaption><p><strong>Starting point</strong><br>A local model may be spilling part of its workload onto the CPU.</p><div class="value-result"><p><strong>What you get</strong><br>A residency check and a Modelfile recording the tested context, batch, and GPU settings.</p></div><p>Create the named variant and verify it again when the model or host load changes.</p><p class="value-note">Illustrative workflow. No speed increase or permanent residency is promised.</p></figure></section>
 
-It sets `num_ctx`, `num_batch`, and `num_gpu`, then writes a Modelfile. The Modelfile records the configuration. Create the named Ollama variant from it, then run that model by name. Those settings change how much context and how many layers the host tries to keep in VRAM. They do not make the model reason better by themselves.
-
-If part of the model spills to CPU, generation can run several times slower. Ollama picks a default context from detected VRAM, version, and any override. Check the CONTEXT column in `ollama ps` instead of assuming a 4K default from a 24 GB card label. Official docs use GiB bands, which are not the same as advertised GB.
-
-<div class="cta-row">
-  <a class="cta cta-primary" href="/install">Install Finetuna →</a>
-  <a class="cta cta-secondary" href="https://github.com/Catalyst-Forge-LLC/finetuna">View on GitHub</a>
-</div>
-
-<p class="kicker">npm · pnpm · Node 18+ · MIT</p>
+The saved Modelfile records `num_ctx`, `num_batch`, and `num_gpu`. Create the named Ollama variant from it, then run that name. Check the CONTEXT column in `ollama ps` instead of assuming a fixed default.
 
 ## What it answers
 
