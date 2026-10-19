@@ -14,10 +14,71 @@ and runs `ollama create`. Those settings change how much context and how
 many layers the host tries to keep in VRAM. They do not make the model
 reason better by themselves.
 
+## Prerequisites
+
+- Node.js 18+
+- [Ollama](https://ollama.com) running, with at least one model pulled
+- Optional: [pnpm](https://pnpm.io/installation) for checkout work
+- Optional: memory hints via `nvidia-smi`, Apple `sysctl`/`vm_stat`, AMD
+  `rocm-smi`, or Windows WMI
+
+## Install
+
 ```bash
-finetuna --check              # fit and context headroom; no create
-finetuna                      # named variant
-finetuna --auto-tune          # context fit-search (median + spread)
+npm install -g finetuna
+# or: pnpm add -g finetuna
+finetuna --help
+```
+
+From GitHub:
+
+```bash
+npm install -g github:Catalyst-Forge-LLC/finetuna
+```
+
+Checkout:
+
+```bash
+git clone git@github.com:Catalyst-Forge-LLC/finetuna.git
+cd finetuna
+pnpm install
+pnpm start
+```
+
+### Where files go
+
+| Mode | Modelfile | State / results / benchmark |
+|------|-----------|-----------------------------|
+| Checkout (`pnpm start`) | `./Modelfile-finetuna` | current directory |
+| Installed (`finetuna` on PATH) | `./Modelfile-finetuna` (cwd) | `~/.finetuna/` |
+
+Override the data directory with `FINETUNA_DIR`. `--reload` reads that
+dir, so a global install works from any cwd.
+
+## Quick start
+
+First inspect a model you already have. Create the named variant. Then verify that variant. `llama3.2` stands for a model already on the host. `llama3.2-ft` is the name created by `--name`.
+
+```bash
+finetuna --check
+finetuna --check --model llama3.2 --json
+finetuna --model llama3.2 --name llama3.2-ft --ctx 32768 --auto-tune
+finetuna --verify llama3.2-ft
+```
+
+**Example result (illustrative):** an initial verification reports `size_vram/size=75.0%`. After testing a smaller context and saving `llama3.2-ft`, verification of that name reports `size_vram/size=1.000`. You now have a named setup to reuse and a command to recheck it when host load changes. These are residency ratios at check time, not speed or answer-quality measurements. The example does not promise that the same settings will fit your hardware.
+
+More operations:
+
+```bash
+finetuna --hermes --auto-tune
+finetuna --continue --auto-tune
+finetuna --openclaw --auto-tune
+finetuna --max-vram --auto-tune
+finetuna --benchmark-report
+finetuna --unload
+finetuna --reload
+finetuna --help
 ```
 
 ## When layers leave the GPU
@@ -103,69 +164,6 @@ M-series Macs share unified memory. Finetuna uses `sysctl` / `vm_stat`:
   newer Ollama prefers ≥32GB)
 
 Use ordinary Metal/MLX models from the library. No extra Finetuna flag.
-
-## Prerequisites
-
-- Node.js 18+
-- [Ollama](https://ollama.com) running, with at least one model pulled
-- Optional: [pnpm](https://pnpm.io/installation) for checkout work
-- Optional: memory hints via `nvidia-smi`, Apple `sysctl`/`vm_stat`, AMD
-  `rocm-smi`, or Windows WMI
-
-## Install
-
-```bash
-npm install -g finetuna
-# or: pnpm add -g finetuna
-finetuna --help
-```
-
-From GitHub:
-
-```bash
-npm install -g github:Catalyst-Forge-LLC/finetuna
-```
-
-Checkout:
-
-```bash
-git clone git@github.com:Catalyst-Forge-LLC/finetuna.git
-cd finetuna
-pnpm install
-pnpm start
-```
-
-### Where files go
-
-| Mode | Modelfile | State / results / benchmark |
-|------|-----------|-----------------------------|
-| Checkout (`pnpm start`) | `./Modelfile-finetuna` | current directory |
-| Installed (`finetuna` on PATH) | `./Modelfile-finetuna` (cwd) | `~/.finetuna/` |
-
-Override the data directory with `FINETUNA_DIR`. `--reload` reads that
-dir, so a global install works from any cwd.
-
-## Quick start
-
-First inspect a model you already have. Create the named variant. Then verify that variant. `llama3.2` stands for a model already on the host. `llama3.2-ft` is the name created by `--name`.
-
-```bash
-finetuna --check
-finetuna --check --model llama3.2 --json
-finetuna --model llama3.2 --name llama3.2-ft --ctx 32768 --auto-tune
-finetuna --verify llama3.2-ft
-```
-
-```bash
-finetuna --hermes --auto-tune
-finetuna --continue --auto-tune
-finetuna --openclaw --auto-tune
-finetuna --max-vram --auto-tune
-finetuna --benchmark-report
-finetuna --unload
-finetuna --reload
-finetuna --help
-```
 
 ## Flags
 
