@@ -1,10 +1,10 @@
 ---
-title: "Find settings that fit your model and GPU."
-description: "Finetuna tests runtime settings on your Ollama host, checks GPU residency, and saves a named configuration. Keep a useful setup for the hardware you have, instead of repeatedly guessing at flags."
+title: "Find how much context your Ollama model can use on your GPU."
+description: "Find the largest context window that fits your Ollama model on your GPU without a measured slowdown. Finetuna tests context and runtime settings, checks GPU residency, and saves a named configuration you can reuse."
 order: 1
 ---
 
-<section class="value-hero" aria-label="Finetuna overview"><div class="value-intro"><div class="value-headline"><p class="value-kind">Command-line runtime tuner for Ollama</p><h1>Find settings that fit your model and GPU.</h1></div><div class="value-pitch"><p class="value-lede">Finetuna tests runtime settings on your Ollama host, checks GPU residency, and saves a named configuration. Keep a useful setup for the hardware you have, instead of repeatedly guessing at flags.</p><div class="cta-row"><a class="cta cta-primary" href="/install">Install Finetuna</a><a class="cta cta-secondary" href="#settings-example">See settings and a residency check</a></div><p class="value-limit">It changes runtime settings, not model weights. Results apply to the tested model, context, and host load.</p></div></div>
+<section class="value-hero" aria-label="Finetuna overview"><div class="value-intro"><div class="value-headline"><p class="value-kind">Command-line runtime tuner for Ollama</p><h1>Find how much context your Ollama model can use on your GPU.</h1></div><div class="value-pitch"><p class="value-lede">Find the largest context window that fits your Ollama model on your GPU without a measured slowdown. Finetuna tests context and runtime settings, checks GPU residency, and saves a named configuration you can reuse.</p><div class="cta-row"><a class="cta cta-primary" href="/install">Install Finetuna</a><a class="cta cta-secondary" href="#settings-example">See settings and a residency check</a></div><p class="value-limit">It changes runtime settings, not model weights. Results apply to the tested model, context, and host load.</p></div></div>
 <figure class="value-proof worked-example" id="settings-example" tabindex="-1">
 <figcaption>Keep the settings you checked, then recheck the saved model</figcaption>
 <p class="example-context">Invented Ollama session for llama3.2. Values below illustrate the file and residency messages; they are not measurements from your GPU or recommended settings for every machine.</p>

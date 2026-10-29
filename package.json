@@ -1,7 +1,7 @@
 {
   "name": "finetuna",
   "version": "1.1.24",
-  "description": "Ollama runtime tuner. Measure GPU residency and save a named variant. Weights are not trained.",
+  "description": "Find the context and runtime settings that fit an Ollama model on your GPU, then save and verify a named configuration. No weight training.",
   "engines": {
     "node": ">=18"
   },

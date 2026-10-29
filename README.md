@@ -2,12 +2,9 @@
 
 <img src="https://finetuna.net/logo.png" width="440" alt="Finetuna: a chrome tuna with etched circuits and metallic pixels.">
 
-**Ollama runtime tuner.** Fit more context on your GPU, and keep it.
+**Find how much context your Ollama model can use on your GPU.**
 
-Tune runtime settings for your model and GPU, check whether the tested
-configuration stays on the GPU, and save a named variant. The saved
-settings fit the model and GPU Finetuna tested, under the load at test
-time. Weights are not trained or altered.
+Finetuna tests context and runtime settings on an Ollama host, checks GPU residency, and saves a named variant. Its default search favors the largest context that fits without a measured slowdown. Speed and batch tuning are also available. A result may keep the current settings or reduce context; it applies to the tested model and host load. Weights are not trained or altered.
 
 It sets `num_ctx`, `num_batch`, and `num_gpu`, then writes a Modelfile
 and runs `ollama create`. Those settings change how much context and how
